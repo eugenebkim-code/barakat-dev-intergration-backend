@@ -1,4 +1,4 @@
-# main.py — FlowerShopKR DEMO "электронный прилавок"
+# main.py — BARAKAT PROD "электронный прилавок"
 # Требования:
 # - Python + python-telegram-bot v20+
 # - без AI/оплаты/админки
@@ -12,7 +12,7 @@
 # Файлы рядом:
 #   main.py
 #   catalog.py
-#   flowers/... (пути в catalog.py -> Product.photo)
+#   
 # IMPORTANT:
 # ForceReply messages must be handled via filters.REPLY
 # filters.TEXT is unreliable after callbacks + deleteMessage
@@ -402,7 +402,7 @@ def track_msg(context: ContextTypes.DEFAULT_TYPE, message_id: int):
 # -------------------------
 def kb_home() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("💐 Каталог", callback_data="home:catalog")],
+        [InlineKeyboardButton("🥘 Каталог", callback_data="home:catalog")],
         [InlineKeyboardButton("🧺 Корзина", callback_data="home:cart")],
         [InlineKeyboardButton("ℹ️ Как заказать", callback_data="home:help")],
     ])
@@ -458,7 +458,7 @@ def kb_cart(has_items: bool) -> InlineKeyboardMarkup:
         rows.append([InlineKeyboardButton("✅ Оформить", callback_data="checkout:start")])
         rows.append([InlineKeyboardButton("🧹 Очистить", callback_data="cart:clear")])
     rows.append([
-        InlineKeyboardButton("💐 В каталог", callback_data="nav:catalog"),
+        InlineKeyboardButton("🥘 В каталог", callback_data="nav:catalog"),
         InlineKeyboardButton("🏠 Домой", callback_data="nav:home"),
     ])
     return InlineKeyboardMarkup(rows)
@@ -504,13 +504,22 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # -------------------------
 def home_text() -> str:
     return (
-        "🌸✨ <b>FlowerShopKR</b> ✨🌸\n\n"
-        "Премиальные букеты и авторские композиции\n"
-        "для особых моментов 💐\n\n"
-        "🚚 Доставка и самовывоз\n"
-        "🎁 Индивидуальная упаковка\n"
-        "💌 Открытки и пожелания\n\n"
-        "Выберите действие ниже ⬇️"
+        "🍽️ <b>Кафе «БАРАКАТ»</b>\n"
+        "СТРОГО ХАЛАЛ\n\n"
+        "Традиционная узбекская кухня по древним рецептам.\n"
+        "Каждый день новое меню.\n\n"
+        "Готовим ежедневно из свежих и качественных продуктов.\n"
+        "Без заготовок.\n\n"
+        "🥘 Домашние блюда\n"
+        "🍜 Горячее и салаты\n"
+        "🥟 Классика узбекской кухни\n\n"
+        "🚶 Самовывоз\n"
+        "🛵 Доставка по району\n\n"
+        "💳 Оплата переводом на тонжан владельца\n\n"
+        "Если возникли сложности с оформлением заказа,\n"
+        "звоните 010-8207-4445\n"
+        "или пишите @RustamBaltabaev\n\n"
+        "Выберите, что хотите заказать ⬇️"
     )
 
 async def render_home(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
@@ -1333,7 +1342,7 @@ async def on_staff_decision(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # --- действие ---
     if action == "approve":
         new_status = "approved"
-        buyer_text = "💐 Ваш заказ принят в работу!"
+        buyer_text = "Ваш заказ принят в работу!"
     elif action == "reject":
         new_status = "rejected"
         buyer_text = "❗ Мы уточним детали заказа и свяжемся с вами."
@@ -1496,9 +1505,9 @@ async def on_catalog_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await catalog_cmd(update, context)
         return
 
-SHOP_NAME = "Цветочный бутик"
-SHOP_PHONE = "010-1234-5678"
-SHOP_NOTE = "Свежие цветы. Индивидуальная упаковка."
+SHOP_NAME = "БАРАКАТ"
+SHOP_PHONE = "010-8207-4445"
+SHOP_NOTE = "Традиционная узбекская кухня. ХАЛАЛ"
 
 
 # -------------------------
