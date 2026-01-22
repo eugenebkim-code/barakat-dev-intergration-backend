@@ -856,6 +856,12 @@ async def dash_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # -------------------------
 
 async def on_checkout_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.id in STAFF_CHAT_IDS:
+        return
+
+    if not context.user_data.get("checkout_step"):
+        return
+    
     msg = update.message
     if not msg or not msg.reply_to_message:
         return
