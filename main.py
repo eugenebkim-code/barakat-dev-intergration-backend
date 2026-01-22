@@ -2211,8 +2211,22 @@ def main():
         log.info("🟥 DEBUG: PHOTO UPDATE ARRIVED")
 
     
-    # -------- BUYER PHOTO (payment proof) --------
+    app.add_handler(
+        MessageHandler(
+            filters.TEXT & filters.REPLY & ~filters.PHOTO & ~filters.Document.ALL,
+            on_checkout_reply
+        )
+    )
+
+    # -------- STAFF --------
+    app.add_handler(
+        MessageHandler(
+            filters.PHOTO & filters.Chat(STAFF_CHAT_IDS),
+            on_staff_photo
+        )
+    )
     
+    # ✅ ВОТ СЮДА
     register_broadcast_handlers(
         app,
         owner_chat_id=OWNER_CHAT_ID_INT,
@@ -2221,32 +2235,8 @@ def main():
         spreadsheet_id=SPREADSHEET_ID,
     )
 
-    # -------- STAFF --------
-    app.add_handler(
-        MessageHandler(
-            filters.TEXT & filters.Chat(STAFF_CHAT_IDS),
-            on_staff_text
-        )
-    )
+# -------- BUYER PHOTO (payment proof) --------
     
-    app.add_handler(
-        MessageHandler(
-            filters.PHOTO & filters.Chat(STAFF_CHAT_IDS),
-            on_staff_photo
-        )
-    )
-    # -------- STAFF TEXT (ОБЯЗАТЕЛЬНО) --------
-    app.add_handler(
-        MessageHandler(
-            filters.TEXT
-            & filters.REPLY
-            & ~filters.Chat(STAFF_CHAT_IDS)
-            & ~filters.PHOTO
-            & ~filters.Document.ALL,
-            on_checkout_reply
-        )
-    )
-
     log.info("Bot started")
     app.run_polling(
         allowed_updates=[
@@ -2255,7 +2245,6 @@ def main():
         ],
         drop_pending_updates=True,
     )
-
 
 def get_product_by_id(pid: str) -> dict | None:
     for p in read_products_from_sheets():
