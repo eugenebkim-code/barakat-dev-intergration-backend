@@ -2223,21 +2223,7 @@ def main():
         )
     )
 
-    # -------- STAFF --------
-    app.add_handler(
-        MessageHandler(
-            filters.PHOTO & filters.Chat(STAFF_CHAT_IDS),
-            on_staff_photo
-        )
-    )
-    # -------- STAFF TEXT (ОБЯЗАТЕЛЬНО) --------
-    app.add_handler(
-        MessageHandler(
-            filters.TEXT & ~filters.COMMAND & filters.Chat(STAFF_CHAT_IDS),
-            on_staff_text
-        )
-    )
-# -------- BUYER PHOTO (payment proof) --------
+    # -------- BUYER PHOTO (payment proof) --------
     
     register_broadcast_handlers(
         app,
@@ -2255,6 +2241,22 @@ def main():
         ],
         drop_pending_updates=True,
     )
+
+    # -------- STAFF --------
+    app.add_handler(
+        MessageHandler(
+            filters.PHOTO & filters.Chat(STAFF_CHAT_IDS),
+            on_staff_photo
+        )
+    )
+    # -------- STAFF TEXT (ОБЯЗАТЕЛЬНО) --------
+    app.add_handler(
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND & filters.Chat(STAFF_CHAT_IDS),
+            on_staff_text
+        )
+    )
+
 
 def get_product_by_id(pid: str) -> dict | None:
     for p in read_products_from_sheets():
