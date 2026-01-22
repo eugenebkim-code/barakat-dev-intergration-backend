@@ -1579,6 +1579,9 @@ async def on_staff_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if chat_id not in STAFF_CHAT_IDS:
         return
 
+    if context.user_data.get("broadcast_mode"):
+        return
+
     text = (update.message.text or "").strip()
 
     # ===== ДОБАВЛЕНИЕ ТОВАРА =====
