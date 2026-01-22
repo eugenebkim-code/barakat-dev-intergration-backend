@@ -2239,7 +2239,7 @@ def main():
             filters.TEXT & ~filters.COMMAND & filters.Chat(STAFF_CHAT_IDS),
             on_staff_text
         )
-        group=10
+        group=10,
     )
 
     # ✅ ВОТ СЮДА
