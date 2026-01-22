@@ -2233,7 +2233,7 @@ def main():
     # -------- STAFF TEXT --------
     app.add_handler(
         MessageHandler(
-            filters.TEXT & filters.Chat(STAFF_CHAT_IDS),
+            filters.TEXT & ~filters.COMMAND & filters.Chat(STAFF_CHAT_IDS),
             on_staff_text
         )
     )
