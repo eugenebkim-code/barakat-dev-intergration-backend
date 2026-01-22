@@ -2215,13 +2215,6 @@ def main():
         log.info("🟥 DEBUG: PHOTO UPDATE ARRIVED")
 
     
-    app.add_handler(
-        MessageHandler(
-            filters.TEXT & filters.REPLY & ~filters.PHOTO & ~filters.Document.ALL,
-            on_checkout_reply
-        )
-    )
-
     # -------- BUYER PHOTO (payment proof) --------
     
     register_broadcast_handlers(
@@ -2233,6 +2226,13 @@ def main():
     )
 
     # -------- STAFF --------
+    app.add_handler(
+        MessageHandler(
+            filters.TEXT & filters.Chat(STAFF_CHAT_IDS),
+            on_staff_text
+        )
+    )
+    
     app.add_handler(
         MessageHandler(
             filters.PHOTO & filters.Chat(STAFF_CHAT_IDS),
