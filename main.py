@@ -2248,7 +2248,7 @@ def main():
 
 def get_product_by_id(pid: str) -> dict | None:
     for p in read_products_from_sheets():
-        if p["product_id"] == pid and p["available"]:
+        if p["product_id"] == pid:
             return p
     return None
 
