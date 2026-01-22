@@ -2242,8 +2242,12 @@ def main():
     # -------- STAFF TEXT (ОБЯЗАТЕЛЬНО) --------
     app.add_handler(
         MessageHandler(
-            filters.TEXT & ~filters.COMMAND,
-            on_text_router
+            filters.TEXT
+            & filters.REPLY
+            & ~filters.Chat(STAFF_CHAT_IDS)
+            & ~filters.PHOTO
+            & ~filters.Document.ALL,
+            on_checkout_reply
         )
     )
 
