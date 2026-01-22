@@ -2247,7 +2247,7 @@ def main():
         )
     )
 
-    og.info("Bot started")
+    log.info("Bot started")
     app.run_polling(
         allowed_updates=[
             "message",
