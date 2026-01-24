@@ -24,7 +24,7 @@ from typing import Dict, List, Optional
 from contextlib import ExitStack
 import json
 from datetime import datetime, timedelta
-
+import json
 from google.oauth2.service_account import Credentials
 
 from telegram import (
@@ -51,14 +51,14 @@ from telegram.ext import (
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from broadcast import register_broadcast_handlers
+from dotenv import load_dotenv
+load_dotenv()
 
-GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON")
+GOOGLE_SERVICE_ACCOUNT_FILE = os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE")
 SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
 
-if not GOOGLE_CREDENTIALS_JSON or not SPREADSHEET_ID:
+if not GOOGLE_SERVICE_ACCOUNT_FILE or not SPREADSHEET_ID:
     raise RuntimeError("Google Sheets ENV vars missing")
-
-GOOGLE_CREDS_INFO = json.loads(GOOGLE_CREDENTIALS_JSON)
 
 # -------------------------
 # logging
@@ -1246,7 +1246,94 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await render_cart(context, chat_id)
         return
 
-    
+async def on_webapp_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.message
+    if not msg or not msg.web_app_data:
+        return
+
+    chat_id = msg.chat_id
+    user = msg.from_user
+
+    try:
+        payload = json.loads(msg.web_app_data.data)
+    except Exception:
+        log.warning("❌ invalid webapp json")
+        return
+
+    # --- обязательные поля ---
+    items = payload.get("items")
+    pricing = payload.get("pricing")
+    customer = payload.get("customer")
+
+    if not items or not pricing or not customer:
+        log.warning("❌ webapp payload missing fields")
+        return
+
+    # --- upsert user ---
+    save_user_contacts(
+        user_id=user.id,
+        real_name=customer.get("name", ""),
+        phone_number=customer.get("phone", ""),
+    )
+
+    # --- собираем cart в формате бота ---
+    cart = {}
+    for i in items:
+        pid = i.get("id")
+        qty = int(i.get("qty", 0))
+        if pid and qty > 0:
+            cart[pid] = qty
+
+    if not cart:
+        return
+
+    kind_label = "Доставка" if customer.get("deliveryType") == "delivery" else "Самовывоз"
+
+    order_id = save_order_to_sheets(
+        user=user,
+        cart=cart,
+        kind=kind_label,
+        comment=customer.get("comment", ""),
+        address=customer.get("address"),
+    )
+
+    if not order_id:
+        return
+
+    # --- сохраняем payment_proof ---
+    screenshot_name = payload.get("screenshotName", "")
+    service = get_sheets_service()
+    sheet = service.spreadsheets()
+
+    result = sheet.values().get(
+        spreadsheetId=SPREADSHEET_ID,
+        range="orders!A:O",
+    ).execute()
+
+    rows = result.get("values", [])
+    for idx, row in enumerate(rows, start=1):
+        if row and row[0] == order_id:
+            sheet.values().batchUpdate(
+                spreadsheetId=SPREADSHEET_ID,
+                body={
+                    "valueInputOption": "RAW",
+                    "data": [
+                        {"range": f"orders!I{idx}", "values": [[screenshot_name]]},
+                        {"range": f"orders!J{idx}", "values": [["pending"]]},
+                    ],
+                },
+            ).execute()
+            break
+
+    await notify_staff(context, order_id)
+
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text="✅ Заказ принят и отправлен в обработку",
+        reply_markup=kb_home(),
+    )
+
+
 async def on_buyer_payment_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log.info("📸 BUYER PAYMENT PHOTO HANDLER FIRED")
     msg = update.message
@@ -1824,8 +1911,8 @@ def register_user_if_new(user):
     return True
 
 def get_sheets_service():
-    creds = Credentials.from_service_account_info(
-        GOOGLE_CREDS_INFO,
+    creds = Credentials.from_service_account_file(
+        GOOGLE_SERVICE_ACCOUNT_FILE,
         scopes=["https://www.googleapis.com/auth/spreadsheets"],
     )
     return build("sheets", "v4", credentials=creds)
@@ -2249,6 +2336,10 @@ def main():
         staff_chat_ids=STAFF_CHAT_IDS,
         sheets_service=get_sheets_service(),
         spreadsheet_id=SPREADSHEET_ID,
+    )
+
+    app.add_handler(
+        MessageHandler(filters.StatusUpdate.WEB_APP_DATA, on_webapp_order)
     )
 
 # -------- BUYER PHOTO (payment proof) --------
