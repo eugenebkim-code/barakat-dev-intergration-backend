@@ -530,10 +530,17 @@ def home_text() -> str:
         "⬇️НАЖМИТЕ КНОПКУ WebAPP⬇️\n"
     )
 
+HOME_PHOTO_FILE_ID = "AgACAgUAAxkBAAIFXWlzepUdhbnO3TralwEV7ZUKdDL-AALZDmsbXEmhV63griXhyTv6AQADAgADeQADOAQ"
+
 async def render_home(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
     nav = _get_nav(context)
     nav["screen"] = "home"
+
     await clear_ui(context, chat_id)
+<<<<<<< HEAD
+=======
+
+>>>>>>> 2cc53783f8363629ce9838cbb3baaa3e7a95654d
     msg = await context.bot.send_photo(
         chat_id=chat_id,
         photo=HOME_PHOTO_FILE_ID,
@@ -541,6 +548,7 @@ async def render_home(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
         parse_mode=ParseMode.HTML,
         reply_markup=kb_home(),
     )
+
     track_msg(context, msg.message_id)
 
 async def render_categories(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
