@@ -4,3 +4,6 @@ google-auth
 google-auth-oauthlib
 openai
 python-dotenv
+
+fastapi
+uvicorn

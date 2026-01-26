@@ -22,7 +22,6 @@ import os
 import logging
 from typing import Dict, List, Optional
 from contextlib import ExitStack
-import json
 from datetime import datetime, timedelta
 import json
 from google.oauth2.service_account import Credentials
@@ -33,7 +32,11 @@ from telegram import (
     InlineKeyboardMarkup,
     InputMediaPhoto,
 )
-
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    CallbackQueryHandler,
+)
 from telegram import ForceReply
 
 from telegram.constants import ParseMode
@@ -47,19 +50,24 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
-
+from sheets_repo import get_sheets_service
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from broadcast import register_broadcast_handlers
 from dotenv import load_dotenv
 load_dotenv()
 
-GOOGLE_SERVICE_ACCOUNT_FILE = os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE")
-SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
+from telegram.ext import CallbackQueryHandler
+from staff_callbacks import staff_callback
 
-if not GOOGLE_SERVICE_ACCOUNT_FILE or not SPREADSHEET_ID:
-    raise RuntimeError("Google Sheets ENV vars missing")
-
+from config import (
+    BOT_TOKEN,
+    OWNER_CHAT_ID_INT,
+    ADMIN_CHAT_ID_INT,
+    STAFF_CHAT_IDS,
+    SPREADSHEET_ID,
+)
+HOME_PHOTO_FILE_ID = "AgACAgUAAxkBAAIBWml2tkzPZ3lgBPKTVeeA3Wi9Z3yJAAKuDWsbhLi4VyKeP_hEUISAAQADAgADeQADOAQ"
 # -------------------------
 # logging
 # -------------------------
@@ -68,30 +76,6 @@ logging.basicConfig(
     level=logging.INFO,
 )
 log = logging.getLogger("FlowerShopKR")
-
-
-# -------------------------
-# config
-# -------------------------
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
-
-OWNER_CHAT_ID = os.getenv("OWNER_CHAT_ID")
-if not OWNER_CHAT_ID:
-    raise RuntimeError("OWNER_CHAT_ID is not set")
-
-OWNER_CHAT_ID_INT = int(OWNER_CHAT_ID)
-
-ADMIN_CHAT_ID_INT = int(ADMIN_CHAT_ID)
-STAFF_CHAT_IDS = {
-    int(x) for x in os.getenv("STAFF_CHAT_IDS", "").split(",")
-    if x.strip().isdigit()
-}
-STAFF_CHAT_IDS.add(ADMIN_CHAT_ID_INT)
-if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN is not set")
-if not ADMIN_CHAT_ID:
-    raise RuntimeError("ADMIN_CHAT_ID is not set")
 
 
 
@@ -233,6 +217,15 @@ from datetime import datetime
 def load_categories() -> list[str]:
     rows = read_products_from_sheets()
     return sorted({r["category"] for r in rows if r["available"]})
+
+# -------------------------
+# web api patch - note - delete
+# -------------------------
+
+from types import SimpleNamespace
+from telegram import Bot
+
+_bot_instance = Bot(token=BOT_TOKEN)
 
 # -------------------------
 # helpers: cart text
@@ -524,30 +517,27 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # -------------------------
 def home_text() -> str:
     return (
-        "🍽️ <b>Кафе «БАРАКАТ»</b>\n"
-        "☪️СТРОГО ХАЛАЛ☪️\n\n"
-        "Традиционная узбекская кухня по древним рецептам.\n"
-        "Готовим ежедневно из самых свежих и качественных продуктов.\n"
-        "🥘 Домашние блюда\n"
-        "🍜 Горячее и салаты\n"
-        "🥟 Классика узбекской кухни\n\n"
-        "🛵 Доставка по Дунпо - 4.000 ₩,\n"
-        "а если заказ на сумму 30.000 ₩ доставка бесплатно!\n\n"
-        "💳 Оплата переводом на тонжан владельца\n\n"
-        "Всегда начинайте Ваш заказ написав команду /start прямо в чат.\n\n"
-        "Если возникли сложности с оформлением заказа,\n"
-        "звоните 010-8207-4445\n"
-        "или пишите @RustamBaltabaev\n\n"
-        "Выберите, что хотите заказать ⬇️"
+        "РАДУГА ДУНПО 🌈\n"
+        "Магазин русских товаров и домашней выпечки\n\n"
+        "📍🚚 Доставка по Дунпо 4.000 ₩ .\n"
+        "🆓 Бесплатно от 50.000 ₩.\n"
+        "🥘 📞 Для справок: 010-XXXX-XXXX\n"
+        
+        "💳 Оплата переводом на счет магазина\n\n"
+        "Всегда начинайте Ваш заказ написав команду /start прямо в чат Telegram.\n\n"        
+        "👇\n"
+        "ЧТОБЫ СДЕЛАТЬ ЗАКАЗ\n\n"
+        "⬇️НАЖМИТЕ КНОПКУ WebAPP⬇️\n"
     )
 
 async def render_home(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
     nav = _get_nav(context)
     nav["screen"] = "home"
     await clear_ui(context, chat_id)
-    msg = await context.bot.send_message(
+    msg = await context.bot.send_photo(
         chat_id=chat_id,
-        text=home_text(),
+        photo=HOME_PHOTO_FILE_ID,
+        caption=home_text(),
         parse_mode=ParseMode.HTML,
         reply_markup=kb_home(),
     )
@@ -1129,12 +1119,6 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 },
             ).execute()
 
-        # 5) уведомляем сотрудника ОДИН РАЗ
-        await notify_staff(
-            context,
-            order_id,
-        )
-
         # 6) чистим state
         context.user_data.pop("checkout", None)
         context.user_data.pop("checkout_step", None)
@@ -1245,94 +1229,6 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop("checkout_step", None)
         await render_cart(context, chat_id)
         return
-
-async def on_webapp_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = update.message
-    if not msg or not msg.web_app_data:
-        return
-
-    chat_id = msg.chat_id
-    user = msg.from_user
-
-    try:
-        payload = json.loads(msg.web_app_data.data)
-    except Exception:
-        log.warning("❌ invalid webapp json")
-        return
-
-    # --- обязательные поля ---
-    items = payload.get("items")
-    pricing = payload.get("pricing")
-    customer = payload.get("customer")
-
-    if not items or not pricing or not customer:
-        log.warning("❌ webapp payload missing fields")
-        return
-
-    # --- upsert user ---
-    save_user_contacts(
-        user_id=user.id,
-        real_name=customer.get("name", ""),
-        phone_number=customer.get("phone", ""),
-    )
-
-    # --- собираем cart в формате бота ---
-    cart = {}
-    for i in items:
-        pid = i.get("id")
-        qty = int(i.get("qty", 0))
-        if pid and qty > 0:
-            cart[pid] = qty
-
-    if not cart:
-        return
-
-    kind_label = "Доставка" if customer.get("deliveryType") == "delivery" else "Самовывоз"
-
-    order_id = save_order_to_sheets(
-        user=user,
-        cart=cart,
-        kind=kind_label,
-        comment=customer.get("comment", ""),
-        address=customer.get("address"),
-    )
-
-    if not order_id:
-        return
-
-    # --- сохраняем payment_proof ---
-    screenshot_name = payload.get("screenshotName", "")
-    service = get_sheets_service()
-    sheet = service.spreadsheets()
-
-    result = sheet.values().get(
-        spreadsheetId=SPREADSHEET_ID,
-        range="orders!A:O",
-    ).execute()
-
-    rows = result.get("values", [])
-    for idx, row in enumerate(rows, start=1):
-        if row and row[0] == order_id:
-            sheet.values().batchUpdate(
-                spreadsheetId=SPREADSHEET_ID,
-                body={
-                    "valueInputOption": "RAW",
-                    "data": [
-                        {"range": f"orders!I{idx}", "values": [[screenshot_name]]},
-                        {"range": f"orders!J{idx}", "values": [["pending"]]},
-                    ],
-                },
-            ).execute()
-            break
-
-    await notify_staff(context, order_id)
-
-    await context.bot.send_message(
-        chat_id=chat_id,
-        text="✅ Заказ принят и отправлен в обработку",
-        reply_markup=kb_home(),
-    )
-
 
 async def on_buyer_payment_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log.info("📸 BUYER PAYMENT PHOTO HANDLER FIRED")
@@ -1477,22 +1373,14 @@ async def on_staff_decision(update: Update, context: ContextTypes.DEFAULT_TYPE):
         body={
             "valueInputOption": "RAW",
             "data": [
-                {
-                    "range": f"orders!J{target_index}",
-                    "values": [[new_status]],
-                },
-                {
-                    "range": f"orders!K{target_index}",
-                    "values": [[handled_at.isoformat()]],
-                },
-                {
-                    "range": f"orders!L{target_index}",
-                    "values": [[str(chat_id)]],
-                },
-                {
-                    "range": f"orders!M{target_index}",
-                    "values": [[reaction_seconds]],
-                },
+                {"range": f"orders!J{target_index}", "values": [[new_status]]},
+                {"range": f"orders!K{target_index}", "values": [[handled_at.isoformat()]]},
+                {"range": f"orders!L{target_index}", "values": [[str(chat_id)]]},
+                {"range": f"orders!M{target_index}", "values": [[reaction_seconds]]},
+
+                # ✅ ВАЖНО
+                {"range": f"orders!P{target_index}", "values": [["handled"]]},
+                {"range": f"orders!Q{target_index}", "values": [[""]]},
             ],
         },
     ).execute()
@@ -1510,17 +1398,9 @@ async def on_staff_decision(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # --- фидбек сотруднику ---
     try:
-        await q.edit_message_caption(
-            caption=(
-                q.message.caption
-                + f"\n\n<b>Статус:</b> {new_status.upper()}"
-            ),
-            parse_mode=ParseMode.HTML,
-            reply_markup=None,
-        )
-    except Exception as e:
-        log.warning(f"edit_message_caption failed: {e}")
-
+        await q.message.delete()
+    except Exception:
+        pass
 
 async def on_catalog_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -1596,26 +1476,6 @@ async def on_catalog_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await render_catalog_products(context, chat_id, current_cat)
         else:
             await catalog_cmd(update, context)
-        return
-
-# 1️⃣ ЕСЛИ ЭТО ФОТО — НИЧЕГО НЕ ПЕРЕКЛЮЧАЕМ
-    if action == "photo":
-        set_waiting_photo(context, product_id)
-
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text=(
-                "📷 Отправьте фото для товара.\n\n"
-                "Можно отправить одно фото.\n"
-                "Оно будет привязано к позиции."
-            ),
-        )
-        return
-
-    # 2️⃣ ИНАЧЕ — это toggle
-    if action == "toggle":
-        set_product_available(product_id, not product["available"])
-        await catalog_cmd(update, context)
         return
 
 SHOP_NAME = "БАРАКАТ"
@@ -1910,17 +1770,7 @@ def register_user_if_new(user):
 
     return True
 
-def get_sheets_service():
-    creds = Credentials.from_service_account_file(
-        GOOGLE_SERVICE_ACCOUNT_FILE,
-        scopes=["https://www.googleapis.com/auth/spreadsheets"],
-    )
-    return build("sheets", "v4", credentials=creds)
 
-
-
-def set_waiting_photo(context: ContextTypes.DEFAULT_TYPE, product_id: str):
-    context.user_data["waiting_photo_for"] = product_id
 
 def set_product_available(product_id: str, available: bool):
     service = get_sheets_service()
@@ -2119,56 +1969,48 @@ async def render_catalog_products(
         )
         track_msg(context, m.message_id)
 
-async def notify_staff(context: ContextTypes.DEFAULT_TYPE, order_id: str):
+async def notify_staff(bot, order_id: str):
+    log.error("🔥🔥🔥 notify_staff CALLED")
     service = get_sheets_service()
-    sheet = service.spreadsheets()
-
-    # --- читаем заказы ---
-    result = sheet.values().get(
+    rows = service.spreadsheets().values().get(
         spreadsheetId=SPREADSHEET_ID,
-        range="orders!A:O",
-    ).execute()
+        range="orders!A:Q",
+    ).execute().get("values", [])
 
-    rows = result.get("values", [])
     if len(rows) < 2:
-        return
+        return None
 
-    target = None
-    for row in rows[1:]:
-        if row and row[0] == order_id:
-            target = row
+    order_row = None
+    for r in rows[1:]:
+        if r and r[0] == order_id:
+            order_row = r
             break
 
-    if not target:
-        return
+    if not order_row:
+        log.warning(f"order {order_id} not found")
+        return None
+    
+    order_id        = order_row[0]
+    created_at      = order_row[1]
+    buyer_chat_id   = order_row[2]
+    items           = order_row[4] if len(order_row) > 4 else ""
+    total           = int(order_row[5]) if len(order_row) > 5 and str(order_row[5]).isdigit() else 0
+    kind            = order_row[6] if len(order_row) > 6 else ""
+    comment         = order_row[7] if len(order_row) > 7 else ""
+    payment_file_id = order_row[8] if len(order_row) > 8 else ""
+    status          = order_row[9] if len(order_row) > 9 else ""
 
-    (
-        _order_id,
-        created_at,
-        buyer_chat_id,
-        buyer_username,
-        items,
-        total,
-        kind,
-        comment,
-        payment_file_id,
-        status,
-        *_rest,
-    ) = target + [""] * 10
-
-    delivery_fee = int(target[14]) if len(target) > 14 and target[14] else 0
-
-    # колонка N (address)
-    address = target[13] if len(target) > 13 else ""
-
+    address         = order_row[13] if len(order_row) > 13 else ""
+    delivery_fee    = int(order_row[14]) if len(order_row) > 14 and str(order_row[14]).isdigit() else 0
+        
     if status != "pending":
-        return
+        return None
 
-    # --- вытаскиваем имя / телефон из users ---
     buyer_name = ""
     buyer_phone = ""
 
-    users = sheet.values().get(
+    service = get_sheets_service()
+    users = service.spreadsheets().values().get(
         spreadsheetId=SPREADSHEET_ID,
         range="users!A:F",
     ).execute().get("values", [])
@@ -2179,45 +2021,83 @@ async def notify_staff(context: ContextTypes.DEFAULT_TYPE, order_id: str):
             buyer_phone = u[5] if len(u) > 5 else ""
             break
 
-    address_block = (
-        f"\n📍 <b>Адрес:</b>\n<code>{address}</code>\n"
-        if address else ""
-    )
+    address_block = f"\n📍 <b>Адрес:</b>\n<code>{address}</code>\n" if address else ""
 
+    delivery_line = ""
     if kind == "Доставка":
-        if delivery_fee == 0:
-            delivery_line = "🚚 <b>Доставка:</b> бесплатно\n"
-        else:
-            delivery_line = f"🚚 <b>Доставка:</b> {_fmt_money(delivery_fee)}\n"
-    else:
-        delivery_line = ""
+        delivery_line = (
+            "🚚 <b>Доставка:</b> бесплатно\n"
+            if delivery_fee == 0
+            else f"🚚 <b>Доставка:</b> {_fmt_money(delivery_fee)}\n"
+        )
 
     caption = (
+        "🧨 TEST_NOTIFY_STAFF\n\n"
         "🛎 <b>Новый заказ</b>\n\n"
         f"🧾 ID: <code>{order_id}</code>\n\n"
         f"👤 <b>Имя:</b> {buyer_name or '—'}\n"
         f"📞 <b>Телефон:</b> <code>{buyer_phone or '—'}</code>\n"
-        f"{address_block}\n"
+        f"{address_block}"
         f"{items}\n\n"
         f"{delivery_line}"
-        f"💰 Итого: <b>{_fmt_money(int(total))}</b>\n"
+        f"💰 Итого: <b>{_fmt_money(total)}</b>\n"
         f"🚚 Способ: <b>{kind}</b>\n"
         f"💬 Комментарий: <b>{comment or '—'}</b>"
     )
 
+    first_msg = None
+
     for staff_id in STAFF_CHAT_IDS:
         try:
-            await context.bot.send_photo(
-                chat_id=staff_id,
-                photo=payment_file_id,
-                caption=caption,
-                parse_mode=ParseMode.HTML,
-                reply_markup=kb_staff_order(order_id),
-            )
+            if payment_file_id:
+                msg = await bot.send_photo(
+                    chat_id=staff_id,
+                    photo=payment_file_id,
+                    caption=caption,
+                    parse_mode="HTML",
+                    reply_markup=kb_staff_order(order_id),
+                )
+            else:
+                msg = await bot.send_message(
+                    chat_id=staff_id,
+                    text=caption,
+                    parse_mode="HTML",
+                    reply_markup=kb_staff_order(order_id),
+                )
+
+            if first_msg is None:
+                first_msg = msg
+
         except Exception as e:
-            log.warning(f"⚠️ notify_staff failed for {staff_id}: {e}")
+            log.warning(f"notify_staff failed for {staff_id}: {e}")
 
+    return first_msg
 
+def get_order_from_sheet(row: list) -> dict:
+    def safe_int(val, default=0):
+        try:
+            return int(val)
+        except (TypeError, ValueError):
+            return default
+
+    return {
+        "customer": {
+            "name": row[3] if len(row) > 3 else "",
+            "phone": row[4] if len(row) > 4 else "",
+            "deliveryType": row[5] if len(row) > 5 else "",
+            "address": row[6] if len(row) > 6 else "",
+            "comment": row[7] if len(row) > 7 else "",
+        },
+        "pricing": {
+            "itemsTotal": safe_int(row[10] if len(row) > 10 else 0),
+            "delivery": safe_int(row[11] if len(row) > 11 else 0),
+            "grandTotal": safe_int(row[12] if len(row) > 12 else 0),
+        },
+        "items": [],  # позже можно подтянуть из отдельного листа
+        "screenshotBase64": row[13] if len(row) > 13 and row[13] else None,
+    }
+
+from telegram import Bot
 
 def build_checkout_preview(
     cart: dict,
@@ -2258,6 +2138,16 @@ def main():
     
     
     app = Application.builder().token(BOT_TOKEN).build()
+    from webapp_orders_sync import webapp_orders_job
+
+  #  app.job_queue.run_repeating(
+  #      webapp_orders_job,
+  #      interval=5,
+  #      first=5,
+  #      data={
+  #          "spreadsheet_id": SPREADSHEET_ID,
+  #      },
+  #  )
     # -------- COMMANDS --------
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("restart", restart_cmd))
@@ -2267,7 +2157,7 @@ def main():
     app.add_handler(CommandHandler("dash", dash_cmd))
 
     # -------- CALLBACKS (ВСЕ КНОПКИ) --------
-    
+
     app.add_handler(
         MessageHandler(
             (filters.PHOTO | filters.Document.IMAGE)
@@ -2290,25 +2180,11 @@ def main():
         )
     )
 
+    # ✅ ЕДИНСТВЕННЫЙ staff handler
     app.add_handler(
         CallbackQueryHandler(
-            on_staff_decision,
+            staff_callback,
             pattern=r"^staff:(approve|reject):"
-        )
-    )
-
-    async def debug_any_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        log.info("🟥 DEBUG: PHOTO UPDATE ARRIVED")
-
-    
-    app.add_handler(
-        MessageHandler(
-            filters.TEXT
-            & filters.REPLY
-            & ~filters.Chat(STAFF_CHAT_IDS)
-            & ~filters.PHOTO
-            & ~filters.Document.ALL,
-            on_checkout_reply
         )
     )
 
@@ -2338,10 +2214,7 @@ def main():
         spreadsheet_id=SPREADSHEET_ID,
     )
 
-    app.add_handler(
-        MessageHandler(filters.StatusUpdate.WEB_APP_DATA, on_webapp_order)
-    )
-
+    
 # -------- BUYER PHOTO (payment proof) --------
     
     log.info("Bot started")
@@ -2349,6 +2222,7 @@ def main():
         allowed_updates=[
             "message",
             "callback_query",
+            "web_app_data",
         ],
         drop_pending_updates=True,
     )
