@@ -1897,11 +1897,12 @@ async def on_staff_courier_retry(update: Update, context: ContextTypes.DEFAULT_T
 
     await send_to_courier_and_persist(rows[target_idx - 1], target_idx)
 
+import uuid
+
 async def on_owner_commission_paid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
 
-    # ⛔️ ТОЛЬКО АДМИН МОЖЕТ ЗАКРЫТЬ ПЕРИОД
     if q.message.chat_id != ADMIN_CHAT_ID_INT:
         return
 
@@ -1913,6 +1914,52 @@ async def on_owner_commission_paid(update: Update, context: ContextTypes.DEFAULT
         range="orders!A:AC",
     ).execute().get("values", [])
 
+    unpaid_rows = []
+    total_amount = 0
+    dates = []
+
+    for r in rows[1:]:
+        if len(r) > 28 and r[28] == "unpaid":
+            try:
+                total_amount += int(r[27])
+            except Exception:
+                pass
+
+            if len(r) > 26 and r[26]:
+                dates.append(r[26])  # delivery_confirmed_at
+
+            unpaid_rows.append(r)
+
+    if not unpaid_rows:
+        await q.answer("Нет задолженности", show_alert=True)
+        return
+
+    payment_id = str(uuid.uuid4())
+    paid_at = datetime.utcnow().isoformat()
+    period_from = min(dates) if dates else ""
+    period_to = max(dates) if dates else ""
+    orders_count = len(unpaid_rows)
+
+    # 1. пишем платеж
+    sheet.values().append(
+        spreadsheetId=SPREADSHEET_ID,
+        range="payments!A:H",
+        valueInputOption="RAW",
+        body={
+            "values": [[
+                payment_id,
+                paid_at,
+                total_amount,
+                period_from,
+                period_to,
+                orders_count,
+                str(ADMIN_CHAT_ID_INT),
+                "",
+            ]]
+        },
+    ).execute()
+
+    # 2. закрываем комиссии
     updates = []
     for i, r in enumerate(rows[1:], start=2):
         if len(r) > 28 and r[28] == "unpaid":
@@ -1931,7 +1978,11 @@ async def on_owner_commission_paid(update: Update, context: ContextTypes.DEFAULT
 
     await context.bot.send_message(
         chat_id=ADMIN_CHAT_ID_INT,
-        text="✅ Комиссия отмечена как оплаченная. Период закрыт.",
+        text=(
+            "✅ Платеж зафиксирован\n\n"
+            f"💰 Сумма: {_fmt_money(total_amount)}\n"
+            f"📦 Заказов: {orders_count}"
+        ),
     )
 
     try:
@@ -2714,8 +2765,8 @@ def main():
     )
 
     app.add_handler(
-    CallbackQueryHandler(on_owner_commission_paid, pattern=r"^owner:commission_paid$")
-)
+        CallbackQueryHandler(on_owner_commission_paid, pattern=r"^owner:commission_paid$")
+    )
 
 
     app.add_handler(
