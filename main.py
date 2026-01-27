@@ -1339,16 +1339,56 @@ async def on_staff_decision(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # --- действие ---
     if action == "approve":
-    # статус остается approved
+        # 1. статус
+        new_status = "approved"
+
+        # 2. комиссия (считаем сразу)
+        try:
+            total = int(target_row[5]) if len(target_row) > 5 and str(target_row[5]).isdigit() else 0
+            platform_commission = int(total * 0.10)
+        except Exception:
+            platform_commission = 0
+
+        commission_created_at = datetime.utcnow().isoformat()
+        try:
+            created_at = datetime.fromisoformat(target_row[1])
+            handled_at = datetime.utcnow()
+            reaction_seconds = int((handled_at - created_at).total_seconds())
+        except Exception:
+            handled_at = datetime.utcnow()
+            reaction_seconds = ""
+        # 3. апдейт заказа (ОДИН РАЗ)
+        sheet.values().batchUpdate(
+            spreadsheetId=SPREADSHEET_ID,
+            body={
+                "valueInputOption": "RAW",
+                "data": [
+                    {"range": f"orders!J{target_index}", "values": [["approved"]]},
+                    {"range": f"orders!K{target_index}", "values": [[handled_at.isoformat()]]},
+                    {"range": f"orders!L{target_index}", "values": [[str(chat_id)]]},
+                    {"range": f"orders!M{target_index}", "values": [[reaction_seconds]]},
+
+                    # комиссия
+                    {"range": f"orders!AA{target_index}", "values": [[commission_created_at]]},
+                    {"range": f"orders!AB{target_index}", "values": [[platform_commission]]},
+                    {"range": f"orders!AC{target_index}", "values": [["unpaid"]]},
+                ],
+            },
+        ).execute()
+
+        # 4. следующий шаг — курьер
         await context.bot.send_message(
             chat_id=chat_id,
             text="Через сколько должен приехать курьер?",
             reply_markup=kb_staff_pickup_eta(order_id),
         )
+
+        # 5. чистим старое сообщение
         try:
             await q.message.delete()
         except Exception:
             pass
+
         return
 
     # --- метрика времени реакции ---
