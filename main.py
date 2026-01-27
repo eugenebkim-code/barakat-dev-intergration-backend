@@ -534,10 +534,9 @@ async def render_home(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
     nav = _get_nav(context)
     nav["screen"] = "home"
     await clear_ui(context, chat_id)
-    msg = await context.bot.send_photo(
+    msg = await context.bot.send_message(
         chat_id=chat_id,
-        photo=HOME_PHOTO_FILE_ID,
-        caption=home_text(),
+        text=home_text(),
         parse_mode=ParseMode.HTML,
         reply_markup=kb_home(),
     )
