@@ -89,6 +89,10 @@ async def on_broadcast_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=kb,
     )
 
+def get_service(context):
+    if context.bot_data.get("SHEETS_SERVICE") is None:
+        context.bot_data["SHEETS_SERVICE"] = get_sheets_service()
+    return context.bot_data["SHEETS_SERVICE"]
 
 async def on_broadcast_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query

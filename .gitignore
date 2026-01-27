@@ -2,3 +2,9 @@
 service_account.json
 *.json.key
 .env
+
+__pycache__/
+*.pyc
+venv/
+.env
+.env.*

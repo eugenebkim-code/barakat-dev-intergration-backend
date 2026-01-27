@@ -321,13 +321,7 @@ def append_product_to_sheets(name: str, price: int, category: str, description: 
     except Exception:
         return None
 
-def save_order_to_sheets(
-    user,
-    cart: dict,
-    kind: str,
-    comment: str,
-    address: str | None = None,
-) -> str | None:
+def save_order_to_sheets(user, cart: dict, kind: str, comment: str, address: str | None = None, order_id: str | None = None) -> str | None:
     service = get_sheets_service()
     sheet = service.spreadsheets()
 
@@ -349,7 +343,7 @@ def save_order_to_sheets(
 
     total = subtotal + delivery_fee
 
-    order_id = str(uuid.uuid4())
+    order_id = order_id or str(uuid.uuid4())
     created_at = datetime.utcnow().isoformat()
 
     row = [[
@@ -1185,11 +1179,11 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if checkout.get("type") == "delivery":
             if not context.user_data.get("address_verified"):
                 log.warning("⛔ final_send blocked: address not verified")
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text="❌ Адрес доставки не подтвержден. Повторите ввод адреса.",
-                )
-                return
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="❌ Адрес доставки не подтвержден. Повторите ввод адреса.",
+            )
+            return
             
         payment_file_id = checkout.get("payment_photo_file_id")
         if not payment_file_id:
@@ -1206,13 +1200,51 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         comment = checkout.get("comment", "")
 
         user = q.from_user
+        
+        
+        import uuid
+        from webapi_client import webapi_create_order
 
-        order_id = save_order_to_sheets(
+        order_id = str(uuid.uuid4())
+
+        order_payload = {
+            "order_id": order_id,
+            "source": "kitchen",
+            "client_tg_id": user.id,
+            "client_name": checkout.get("real_name"),
+            "client_phone": checkout.get("phone_number"),
+            "pickup_address": KITCHEN_ADDRESS,
+            "delivery_address": checkout.get("address", ""),
+            "pickup_eta_at": pickup_eta_at,
+            "city": CITY_CODE,
+            "comment": comment,
+        }
+
+        try:
+            resp = await webapi_create_order(order_payload)
+        except Exception:
+            log.exception("❌ Web API order create failed")
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="❌ Не удалось создать заказ. Попробуйте позже.",
+            )
+            return
+
+        if resp.get("status") != "ok":
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="❌ Заказ не принят системой. Повторите попытку.",
+            )
+            return
+
+        # ⬇️ ТОЛЬКО ТЕПЕРЬ пишем в Sheets
+        saved = save_order_to_sheets(
             user=user,
             cart=cart,
             kind=kind_label,
             comment=comment,
             address=checkout.get("address"),
+            order_id=order_id,
         )
 
         save_user_contacts(
@@ -1220,16 +1252,6 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             real_name=checkout.get("real_name"),
             phone_number=checkout.get("phone_number"),
         )
-
-        if not order_id:
-            await clear_ui(context, chat_id)
-            m = await context.bot.send_message(
-                chat_id=chat_id,
-                text="❗ Не удалось отправить заказ. Попробуйте еще раз.",
-                reply_markup=kb_home(),
-            )
-            track_msg(context, m.message_id)
-            return
 
         # cleanup
         context.user_data.pop("checkout", None)
@@ -1258,8 +1280,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         checkout = context.user_data["checkout"]
 
         profile = get_user_profile(q.from_user.id)
-        profile = get_user_profile(user.id)
-
+        
         if profile and profile.get("real_name") and profile.get("phone_number"):
             checkout.update({
                 "real_name": profile["real_name"],
@@ -2005,7 +2026,16 @@ async def send_to_courier_and_persist(order_row: list, target_idx: int):
     service = get_sheets_service()
     sheet = service.spreadsheets()
 
-    payload = json.loads(order_row[21]) if len(order_row) > 21 and order_row[21] else build_courier_payload(order_row)
+    raw_payload = order_row[21] if len(order_row) > 21 else None
+
+    if raw_payload:
+        try:
+            payload = json.loads(raw_payload)
+        except Exception as e:
+            log.error(f"❌ invalid courier payload JSON in row {target_idx}: {e}")
+            payload = build_courier_payload(order_row)
+    else:
+        payload = build_courier_payload(order_row)
 
     try:
         res = await courier_create_order(payload)
@@ -3110,13 +3140,13 @@ def main():
         ),
         group=10
     )
-
+    app.bot_data["SHEETS_SERVICE"] = None
     # ✅ ВОТ СЮДА
     register_broadcast_handlers(
         app,
         owner_chat_id=OWNER_CHAT_ID_INT,
         staff_chat_ids=STAFF_CHAT_IDS,
-        sheets_service=get_sheets_service(),
+        sheets_service=None,
         spreadsheet_id=SPREADSHEET_ID,
     )
 
@@ -3149,19 +3179,6 @@ def get_categories_from_products(products: list[dict]) -> list[str]:
 # -------------------------
 # Web API stub (delivery / zones)
 # -------------------------
-
-def webapi_verify_address(address: str) -> dict:
-    """
-    Заглушка Web API.
-    В будущем здесь будет HTTP-вызов.
-    """
-    return {
-        "ok": True,
-        "zone": "inside",   # inside | outside
-        "distance_km": None,
-        "cached": True,
-    }
-
 
 def webapi_calculate_delivery(cart: dict, address: str) -> dict:
     """

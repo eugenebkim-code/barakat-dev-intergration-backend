@@ -2,7 +2,7 @@
 
 import os
 import json
-import base64
+from pathlib import Path
 from typing import Tuple, Optional
 
 from google.oauth2.service_account import Credentials
@@ -14,13 +14,20 @@ from googleapiclient.discovery import build
 # -------------------------------------------------
 
 SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
-GOOGLE_SERVICE_ACCOUNT_JSON_B64 = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON_B64")
 
 if not SPREADSHEET_ID:
     raise RuntimeError("SPREADSHEET_ID is not set")
 
-if not GOOGLE_SERVICE_ACCOUNT_JSON_B64:
-    raise RuntimeError("GOOGLE_SERVICE_ACCOUNT_JSON_B64 is not set")
+
+# -------------------------------------------------
+# Service account file
+# -------------------------------------------------
+
+BASE_DIR = Path(__file__).resolve().parent
+SERVICE_ACCOUNT_PATH = BASE_DIR / "service_account.json"
+
+if not SERVICE_ACCOUNT_PATH.exists():
+    raise RuntimeError(f"service_account.json not found at {SERVICE_ACCOUNT_PATH}")
 
 
 # -------------------------------------------------
@@ -28,9 +35,8 @@ if not GOOGLE_SERVICE_ACCOUNT_JSON_B64:
 # -------------------------------------------------
 
 def get_sheets_service():
-    service_account_info = json.loads(
-        base64.b64decode(GOOGLE_SERVICE_ACCOUNT_JSON_B64).decode("utf-8")
-    )
+    with open(SERVICE_ACCOUNT_PATH, "r", encoding="utf-8") as f:
+        service_account_info = json.load(f)
 
     creds = Credentials.from_service_account_info(
         service_account_info,
