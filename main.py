@@ -824,17 +824,6 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def dash_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
 
-    if chat_id == ADMIN_CHAT_ID_INT and owner_debt > 0:
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text="Получены деньги от владельца. Закрыть период?",
-            reply_markup=kb_owner_paid(),
-        )
-
-
-    if chat_id != OWNER_CHAT_ID_INT:
-        return
-
     service = get_sheets_service()
     sheet = service.spreadsheets()
 
@@ -851,15 +840,34 @@ async def dash_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # --- считаем owner_debt СНАЧАЛА ---
+    owner_debt = 0
+    for r in rows[1:]:
+        # AB = 27, AC = 28 (0-based)
+        if len(r) > 28 and r[28] == "unpaid":
+            try:
+                owner_debt += int(r[27])
+            except Exception:
+                pass
+
+    # --- админская кнопка ---
+    if chat_id == ADMIN_CHAT_ID_INT and owner_debt > 0:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="Получены деньги от владельца. Закрыть период?",
+            reply_markup=kb_owner_paid(),
+        )
+
+    # --- дальше дашборд владельца ---
+    if chat_id != OWNER_CHAT_ID_INT:
+        return
+
     now = datetime.utcnow()
     today = now.date()
     week_ago = now - timedelta(days=7)
     month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
-    revenue_today = 0
-    revenue_week = 0
-    revenue_month = 0
-
+    revenue_today = revenue_week = revenue_month = 0
     pending = approved = rejected = 0
     reaction_times = []
 
@@ -869,16 +877,13 @@ async def dash_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             total = int(row[5])
             status = row[9]
             reaction_seconds = row[12] if len(row) > 12 else ""
-
         except Exception:
             continue
 
         if created_at.date() == today:
             revenue_today += total
-
         if created_at >= week_ago:
             revenue_week += total
-
         if created_at >= month_start:
             revenue_month += total
 
@@ -899,17 +904,6 @@ async def dash_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sum(reaction_times) / len(reaction_times) / 60
         if reaction_times else 0
     )
-
-    owner_debt = 0
-
-    for r in rows[1:]:
-        # AB = 27, AC = 28 (0-based)
-        if len(r) > 28 and r[28] == "unpaid":
-            try:
-                owner_debt += int(r[27])
-            except Exception:
-                pass
-
 
     text = (
         "📊 <b>Дашборд владельца</b>\n\n"
@@ -1784,9 +1778,6 @@ async def on_staff_eta_manual_click(update: Update, context: ContextTypes.DEFAUL
 
     _, _, order_id = q.data.split(":", 2)
 
-    set_waiting_manual_eta(context, order_id)
-
-    # защита от повторных действий
     service = get_sheets_service()
     sheet = service.spreadsheets()
     rows = sheet.values().get(
@@ -1796,6 +1787,7 @@ async def on_staff_eta_manual_click(update: Update, context: ContextTypes.DEFAUL
 
     target_idx = None
     current_status = ""
+
     for i, r in enumerate(rows[1:], start=2):
         if r and r[0] == order_id:
             target_idx = i
@@ -1805,6 +1797,7 @@ async def on_staff_eta_manual_click(update: Update, context: ContextTypes.DEFAUL
     if not target_idx:
         return
 
+    # защита от повторных решений
     if current_status in ("courier_requested", "courier_not_requested"):
         await q.answer("Решение по курьеру уже принято", show_alert=True)
         try:
@@ -1812,6 +1805,9 @@ async def on_staff_eta_manual_click(update: Update, context: ContextTypes.DEFAUL
         except Exception:
             pass
         return
+
+    # ⬇️ ТОЛЬКО установка ожидания
+    set_waiting_manual_eta(context, order_id)
 
     await context.bot.send_message(
         chat_id=chat_id,
@@ -1822,7 +1818,7 @@ async def on_staff_eta_manual_click(update: Update, context: ContextTypes.DEFAUL
         ),
         parse_mode=ParseMode.HTML,
     )
-    ok = await send_to_courier_and_persist(rows[target_idx - 1], target_idx)
+
     try:
         await q.message.delete()
     except Exception:
@@ -1897,7 +1893,7 @@ async def send_to_courier_and_persist(order_row: list, target_idx: int):
                 "valueInputOption": "RAW",
                 "data": [
                     {"range": f"orders!W{target_idx}", "values": [[res.get("external_id", "")]]},
-                    {"range": f"orders!T{target_idx}", "values": [["courier_created"]]},
+                    {"range": f"orders!T{target_idx}", "values": [["courier_requested"]]},
                     {"range": f"orders!X{target_idx}", "values": [["ok"]]},
                     {"range": f"orders!Y{target_idx}", "values": [[""]]},
                     {"range": f"orders!Z{target_idx}", "values": [[datetime.utcnow().isoformat()]]},
