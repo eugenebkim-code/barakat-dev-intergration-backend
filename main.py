@@ -504,6 +504,12 @@ def kb_checkout_preview():
         [InlineKeyboardButton("📎 Прикрепить скриншот", callback_data="checkout:attach")],
         [InlineKeyboardButton("❌ Отмена", callback_data="checkout:cancel")],
     ])
+
+def kb_retry_courier(order_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔁 Повторить отправку курьеру", callback_data=f"staff:courier_retry:{order_id}")]
+    ])
+
 # -------------------------
 # menu button telegram
 # -------------------------
@@ -1563,6 +1569,8 @@ async def on_staff_eta(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ),
     )
 
+    ok = await send_to_courier_and_persist(rows[target_idx - 1], target_idx)
+
     try:
         await q.message.delete()
     except Exception:
@@ -1697,7 +1705,7 @@ async def on_staff_eta_manual_click(update: Update, context: ContextTypes.DEFAUL
         ),
         parse_mode=ParseMode.HTML,
     )
-
+    ok = await send_to_courier_and_persist(rows[target_idx - 1], target_idx)
     try:
         await q.message.delete()
     except Exception:
@@ -1716,6 +1724,111 @@ def build_courier_payload(order_row: list) -> dict:
         },
         "comment": order_row[7] if len(order_row) > 7 else "",
     }
+
+import httpx
+import time
+
+COURIER_API_BASE = os.getenv("COURIER_API_BASE", "")
+COURIER_API_KEY  = os.getenv("COURIER_API_KEY", "")
+COURIER_TIMEOUT  = 10
+
+async def courier_create_order(payload: dict) -> dict:
+    """
+    Реальный вызов курьерки.
+    Должен быть идемпотентным по order_id.
+    """
+    if not COURIER_API_BASE:
+        # dev-safe: имитируем успех
+        return {
+            "ok": True,
+            "external_id": f"DEV-{payload.get('order_id')}",
+        }
+
+    headers = {
+        "Authorization": f"Bearer {COURIER_API_KEY}",
+        "Content-Type": "application/json",
+    }
+
+    async with httpx.AsyncClient(timeout=COURIER_TIMEOUT) as client:
+        r = await client.post(
+            f"{COURIER_API_BASE}/orders",
+            headers=headers,
+            json=payload,
+        )
+        r.raise_for_status()
+        data = r.json()
+        return {
+            "ok": True,
+            "external_id": data.get("id"),
+        }
+
+
+async def send_to_courier_and_persist(order_row: list, target_idx: int):
+    service = get_sheets_service()
+    sheet = service.spreadsheets()
+
+    payload = json.loads(order_row[21]) if len(order_row) > 21 and order_row[21] else build_courier_payload(order_row)
+
+    try:
+        res = await courier_create_order(payload)
+        if not res.get("ok"):
+            raise RuntimeError("courier response not ok")
+
+        sheet.values().batchUpdate(
+            spreadsheetId=SPREADSHEET_ID,
+            body={
+                "valueInputOption": "RAW",
+                "data": [
+                    {"range": f"orders!W{target_idx}", "values": [[res.get("external_id", "")]]},
+                    {"range": f"orders!T{target_idx}", "values": [["courier_created"]]},
+                    {"range": f"orders!X{target_idx}", "values": [["ok"]]},
+                    {"range": f"orders!Y{target_idx}", "values": [[""]]},
+                    {"range": f"orders!Z{target_idx}", "values": [[datetime.utcnow().isoformat()]]},
+                ],
+            },
+        ).execute()
+        return True
+
+    except Exception as e:
+        sheet.values().batchUpdate(
+            spreadsheetId=SPREADSHEET_ID,
+            body={
+                "valueInputOption": "RAW",
+                "data": [
+                    {"range": f"orders!X{target_idx}", "values": [["failed"]]},
+                    {"range": f"orders!Y{target_idx}", "values": [[str(e)[:500]]]},
+                ],
+            },
+        ).execute()
+        return False
+
+
+async def on_staff_courier_retry(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+
+    chat_id = q.message.chat_id
+    if chat_id not in STAFF_CHAT_IDS:
+        return
+
+    _, _, order_id = q.data.split(":", 2)
+
+    service = get_sheets_service()
+    sheet = service.spreadsheets()
+    rows = sheet.values().get(
+        spreadsheetId=SPREADSHEET_ID,
+        range="orders!A:Z",
+    ).execute().get("values", [])
+
+    target_idx = None
+    for i, r in enumerate(rows[1:], start=2):
+        if r and r[0] == order_id:
+            target_idx = i
+            break
+    if not target_idx:
+        return
+
+    await send_to_courier_and_persist(rows[target_idx - 1], target_idx)
 
 # -------------------------
 # checkout conversation
@@ -2488,6 +2601,10 @@ def main():
             on_staff_eta_manual_click,
             pattern=r"^staff:eta_manual:"
         )
+    )
+
+    app.add_handler(
+        CallbackQueryHandler(on_staff_courier_retry, pattern=r"^staff:courier_retry:")
     )
 
     # -------- CALLBACKS (ВСЕ КНОПКИ) --------
