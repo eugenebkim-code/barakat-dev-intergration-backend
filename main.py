@@ -1579,6 +1579,39 @@ async def on_staff_no_courier(update: Update, context: ContextTypes.DEFAULT_TYPE
     except Exception:
         pass
 
+def set_waiting_manual_eta(context: ContextTypes.DEFAULT_TYPE, order_id: str):
+    context.user_data["waiting_manual_eta"] = order_id
+
+def pop_waiting_manual_eta(context: ContextTypes.DEFAULT_TYPE) -> str | None:
+    return context.user_data.pop("waiting_manual_eta", None)
+
+async def on_staff_eta_manual_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+
+    chat_id = q.message.chat_id
+    if chat_id not in STAFF_CHAT_IDS:
+        return
+
+    _, _, order_id = q.data.split(":", 2)
+
+    set_waiting_manual_eta(context, order_id)
+
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=(
+            "🕒 <b>Введите дату и время прибытия курьера</b>\n\n"
+            "Формат: <code>DD.MM HH:MM</code>\n"
+            "Пример: <code>28.01 18:30</code>"
+        ),
+        parse_mode=ParseMode.HTML,
+    )
+
+    try:
+        await q.message.delete()
+    except Exception:
+        pass
+
 # -------------------------
 # checkout conversation
 # -------------------------
@@ -1617,6 +1650,70 @@ async def on_staff_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def on_staff_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    order_id = context.user_data.get("waiting_manual_eta")
+    if order_id:
+        text = (update.message.text or "").strip()
+
+        try:
+            dt = datetime.strptime(text, "%d.%m %H:%M")
+            now = datetime.utcnow()
+            dt = dt.replace(year=now.year)
+
+            if dt < now:
+                await update.message.reply_text("❌ Время должно быть в будущем.")
+                return
+
+        except Exception:
+            await update.message.reply_text(
+                "❌ Неверный формат.\nИспользуйте: DD.MM HH:MM"
+            )
+            return
+
+        service = get_sheets_service()
+        sheet = service.spreadsheets()
+
+        rows = sheet.values().get(
+            spreadsheetId=SPREADSHEET_ID,
+            range="orders!A:T",
+        ).execute().get("values", [])
+
+        target_idx = None
+        for i, r in enumerate(rows[1:], start=2):
+            if r and r[0] == order_id:
+                target_idx = i
+                break
+
+        if not target_idx:
+            context.user_data.pop("waiting_manual_eta", None)
+            return
+
+        sheet.values().batchUpdate(
+            spreadsheetId=SPREADSHEET_ID,
+            body={
+                "valueInputOption": "RAW",
+                "data": [
+                    {"range": f"orders!R{target_idx}", "values": [[dt.isoformat()]]},
+                    {"range": f"orders!S{target_idx}", "values": [["manual"]]},
+                    {"range": f"orders!T{target_idx}", "values": [["courier_requested"]]},
+                ],
+            },
+        ).execute()
+
+        buyer_chat_id = int(rows[target_idx - 1][2])
+        await context.bot.send_message(
+            chat_id=buyer_chat_id,
+            text=(
+                "Ваш заказ принят в работу.\n"
+                "Вы можете отслеживать доставку в боте курьерской службы."
+            ),
+        )
+
+        context.user_data.pop("waiting_manual_eta", None)
+        await update.message.reply_text("✅ Время курьера сохранено.")
+        return
+
+
     chat_id = update.effective_chat.id
     if chat_id not in STAFF_CHAT_IDS:
         return
@@ -2281,6 +2378,12 @@ def main():
         CallbackQueryHandler(on_staff_no_courier, pattern=r"^staff:no_courier:")
     )
 
+    app.add_handler(
+        CallbackQueryHandler(
+            on_staff_eta_manual_click,
+            pattern=r"^staff:eta_manual:"
+        )
+    )
 
     # -------- CALLBACKS (ВСЕ КНОПКИ) --------
 
