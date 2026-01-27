@@ -1491,6 +1491,33 @@ async def on_staff_eta(update: Update, context: ContextTypes.DEFAULT_TYPE):
     service = get_sheets_service()
     sheet = service.spreadsheets()
 
+    # --- 5.1 защита от повторного решения ---
+    rows = sheet.values().get(
+        spreadsheetId=SPREADSHEET_ID,
+        range="orders!A:T",
+    ).execute().get("values", [])
+
+    target_idx = None
+    current_status = ""
+    for i, r in enumerate(rows[1:], start=2):
+        if r and r[0] == order_id:
+            target_idx = i
+            current_status = r[19] if len(r) > 19 else ""  # колонка T
+            break
+
+    if not target_idx:
+        return
+
+    if current_status in ("courier_requested", "courier_not_requested"):
+        await q.answer("Решение по курьеру уже принято", show_alert=True)
+        try:
+            await q.message.delete()
+        except Exception:
+            pass
+        return
+    
+    # --- конец защиты ---
+
     # найти строку заказа
     rows = sheet.values().get(
         spreadsheetId=SPREADSHEET_ID,
@@ -1516,6 +1543,15 @@ async def on_staff_eta(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ],
         },
     ).execute()
+
+    payload = build_courier_payload(rows[target_idx - 1])
+    sheet.values().update(
+        spreadsheetId=SPREADSHEET_ID,
+        range=f"orders!V{target_idx}",
+        valueInputOption="RAW",
+        body={"values": [[json.dumps(payload, ensure_ascii=False)]]},
+    ).execute()
+
 
     # уведомляем клиента
     buyer_chat_id = int(rows[target_idx-1][2])
@@ -1550,6 +1586,33 @@ async def on_staff_no_courier(update: Update, context: ContextTypes.DEFAULT_TYPE
         range="orders!A:T",
     ).execute().get("values", [])
 
+    # защита от повторных действий
+    service = get_sheets_service()
+    sheet = service.spreadsheets()
+    rows = sheet.values().get(
+        spreadsheetId=SPREADSHEET_ID,
+        range="orders!A:T",
+    ).execute().get("values", [])
+
+    target_idx = None
+    current_status = ""
+    for i, r in enumerate(rows[1:], start=2):
+        if r and r[0] == order_id:
+            target_idx = i
+            current_status = r[19] if len(r) > 19 else ""  # колонка T
+            break
+
+    if not target_idx:
+        return
+
+    if current_status in ("courier_requested", "courier_not_requested"):
+        await q.answer("Решение по курьеру уже принято", show_alert=True)
+        try:
+            await q.message.delete()
+        except Exception:
+            pass
+        return
+
     target_idx = None
     for i, r in enumerate(rows[1:], start=2):
         if r and r[0] == order_id:
@@ -1564,6 +1627,7 @@ async def on_staff_no_courier(update: Update, context: ContextTypes.DEFAULT_TYPE
             "valueInputOption": "RAW",
             "data": [
                 {"range": f"orders!T{target_idx}", "values": [["courier_not_requested"]]},
+                {"range": f"orders!U{target_idx}", "values": [[""]]},  # courier_no_reason (резерв)
             ],
         },
     ).execute()
@@ -1597,6 +1661,33 @@ async def on_staff_eta_manual_click(update: Update, context: ContextTypes.DEFAUL
 
     set_waiting_manual_eta(context, order_id)
 
+    # защита от повторных действий
+    service = get_sheets_service()
+    sheet = service.spreadsheets()
+    rows = sheet.values().get(
+        spreadsheetId=SPREADSHEET_ID,
+        range="orders!A:T",
+    ).execute().get("values", [])
+
+    target_idx = None
+    current_status = ""
+    for i, r in enumerate(rows[1:], start=2):
+        if r and r[0] == order_id:
+            target_idx = i
+            current_status = r[19] if len(r) > 19 else ""  # колонка T
+            break
+
+    if not target_idx:
+        return
+
+    if current_status in ("courier_requested", "courier_not_requested"):
+        await q.answer("Решение по курьеру уже принято", show_alert=True)
+        try:
+            await q.message.delete()
+        except Exception:
+            pass
+        return
+
     await context.bot.send_message(
         chat_id=chat_id,
         text=(
@@ -1611,6 +1702,20 @@ async def on_staff_eta_manual_click(update: Update, context: ContextTypes.DEFAUL
         await q.message.delete()
     except Exception:
         pass
+
+
+def build_courier_payload(order_row: list) -> dict:
+    return {
+        "order_id": order_row[0],
+        "pickup_address": "KITCHEN_ADDRESS",  # позже из Sheets кухни
+        "dropoff_address": order_row[13] if len(order_row) > 13 else "",
+        "pickup_eta_at": order_row[17] if len(order_row) > 17 else "",
+        "customer": {
+            "name": "",   # можно подтянуть из users
+            "phone": "",
+        },
+        "comment": order_row[7] if len(order_row) > 7 else "",
+    }
 
 # -------------------------
 # checkout conversation
