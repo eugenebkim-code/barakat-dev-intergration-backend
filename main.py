@@ -189,7 +189,7 @@ def read_products_from_sheets() -> list[dict]:
 
     result = sheet.values().get(
         spreadsheetId=SPREADSHEET_ID,
-        range="products!A2:G",
+        range="products!A2:M",
     ).execute()
 
     rows = result.get("values", [])
@@ -202,11 +202,12 @@ def read_products_from_sheets() -> list[dict]:
         products.append({
             "product_id": row[0],
             "name": row[1],
-            "price": int(row[2]),
+            "owner_price": int(row[2]),
             "available": row[3].lower() == "true",
             "category": row[4],
             "photo_file_id": row[5] if len(row) > 5 else None,
             "description": row[6] if len(row) > 6 else None,
+            "customer_price": int(row[12]),
         })
 
     return products
@@ -278,7 +279,7 @@ def save_order_to_sheets(
         if not p:
             continue
         items.append(f"{p['name']} x{qty}")
-        subtotal += p["price"] * qty
+        subtotal += p["customer_price"] * qty
 
     # доставка
     delivery_fee = 0
@@ -369,7 +370,7 @@ def cart_total(cart: Dict[str, int]) -> int:
     for pid, qty in cart.items():
         p = get_product_by_id(pid)
         if p:
-            total += p["price"] * qty
+            total += p["customer_price"] * qty
     return total
 
 def calc_delivery_fee(cart: dict, kind: str) -> int:
@@ -390,7 +391,7 @@ def cart_text(cart: Dict[str, int]) -> str:
         if not p:
             continue
         lines.append(
-            f"• {p['name']} × {qty} = {_fmt_money(p['price'] * qty)}"
+            f"• {p['name']} × {qty} = {_fmt_money(p['customer_price'] * qty)}"
         )
 
     lines.append("")
@@ -455,7 +456,7 @@ def kb_products(category: str) -> InlineKeyboardMarkup:
 
         rows.append([
             InlineKeyboardButton(
-                f"{p['name']} — {_fmt_money(p['price'])}",
+                f"{p['name']} — {_fmt_money(p['customer_price'])}",
                 callback_data=f"prod:{p['product_id']}",
             )
         ])
@@ -686,7 +687,7 @@ async def render_product_card(context: ContextTypes.DEFAULT_TYPE, chat_id: int, 
     text = (
         f"💐 <b>{p['name']}</b>\n"
         f"{desc_block}\n\n"
-        f"Цена: <b>{_fmt_money(p['price'])}</b>\n"
+        f"Цена: <b>{_fmt_money(p['customer_price'])}</b>\n"
         f"В корзине: <b>{qty}</b>"
     )
 
@@ -1371,8 +1372,14 @@ async def on_staff_decision(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # 2. комиссия (считаем сразу)
         try:
-            total = int(target_row[5]) if len(target_row) > 5 and str(target_row[5]).isdigit() else 0
-            platform_commission = int(total * 0.10)
+            platform_commission = 0
+            cart = parse_items_from_order(target_row[4])  # или из context, если есть
+
+            for pid, qty in cart.items():
+                p = get_product_by_id(pid)
+                if not p:
+                    continue
+                platform_commission += (p["customer_price"] - p["owner_price"]) * qty
         except Exception:
             platform_commission = 0
 
@@ -2537,7 +2544,7 @@ async def render_catalog_products(
         status = "доступен" if p["available"] else "скрыт"
         text = (
             f"{i}. <b>{p['name']}</b>\n"
-            f"Цена: {_fmt_money(p['price'])}\n"
+            f"Цена: {_fmt_money(p['owner_price'])}\n"
             f"Статус: {status}"
         )
 
