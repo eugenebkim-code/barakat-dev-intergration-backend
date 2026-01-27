@@ -292,21 +292,22 @@ def save_order_to_sheets(
     created_at = datetime.utcnow().isoformat()
 
     row = [[
-        order_id,             # A
-        created_at,           # B
-        str(user.id),         # C
-        user.username or "",  # D
-        "; ".join(items),     # E
-        total,                # F
-        kind,                 # G
-        comment or "",        # H
-        "",                   # I payment_proof
-        "waiting_payment",    # J status
-        "",                   # K handled_at
-        "",                   # L handled_by
-        "",                   # M reaction_seconds
-        address or "",        # N address
-        delivery_fee,         # O delivery_fee ✅
+        order_id,
+        created_at,
+        str(user.id),
+        user.username or "",
+        "; ".join(items),
+        total,
+        kind,
+        comment or "",
+        "",
+        "created",          # ← статус
+        "",
+        "",
+        "",
+        address or "",
+        delivery_fee,
+        "stub",             # ← delivery_fee_source (новая колонка P)
     ]]
 
     try:
@@ -337,7 +338,24 @@ def kb_staff_order(order_id: str) -> InlineKeyboardMarkup:
         ]
     ])
 
-
+def kb_staff_pickup_eta(order_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("10 мин", callback_data=f"staff:eta:10:{order_id}"),
+            InlineKeyboardButton("20 мин", callback_data=f"staff:eta:20:{order_id}"),
+            InlineKeyboardButton("30 мин", callback_data=f"staff:eta:30:{order_id}"),
+        ],
+        [
+            InlineKeyboardButton("45 мин", callback_data=f"staff:eta:45:{order_id}"),
+            InlineKeyboardButton("60 мин", callback_data=f"staff:eta:60:{order_id}"),
+        ],
+        [
+            InlineKeyboardButton("🕒 Указать дату и время", callback_data=f"staff:eta_manual:{order_id}"),
+        ],
+        [
+            InlineKeyboardButton("❌ Не вызывать курьера", callback_data=f"staff:no_courier:{order_id}"),
+        ],
+    ])
 
 
 def set_waiting_photo(context: ContextTypes.DEFAULT_TYPE, product_id: str):
@@ -358,11 +376,9 @@ def calc_delivery_fee(cart: dict, kind: str) -> int:
     if kind != "delivery":
         return 0
 
-    subtotal = cart_total(cart)
-    if subtotal >= FREE_DELIVERY_FROM:
-        return 0
-
-    return DELIVERY_FEE
+    # временно используем Web API stub
+    result = webapi_calculate_delivery(cart, address=None)
+    return int(result.get("price", 0))
 
 def cart_text(cart: Dict[str, int]) -> str:
     if not cart:
@@ -1317,12 +1333,16 @@ async def on_staff_decision(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # --- действие ---
     if action == "approve":
-        new_status = "approved"
-        buyer_text = "Ваш заказ принят в работу!"
-    elif action == "reject":
-        new_status = "rejected"
-        buyer_text = "❗ Мы уточним детали заказа и свяжемся с вами."
-    else:
+    # статус остается approved
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="Через сколько должен приехать курьер?",
+            reply_markup=kb_staff_pickup_eta(order_id),
+        )
+        try:
+            await q.message.delete()
+        except Exception:
+            pass
         return
 
     # --- метрика времени реакции ---
@@ -1451,6 +1471,113 @@ SHOP_PHONE = "010-8207-4445"
 SHOP_NOTE = "Традиционная узбекская кухня. ХАЛАЛ"
 FREE_DELIVERY_FROM = 30000
 DELIVERY_FEE = 4000
+# -------------------------
+# webapi - handlers
+# -------------------------
+
+async def on_staff_eta(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+
+    chat_id = q.message.chat_id
+    if chat_id not in STAFF_CHAT_IDS:
+        return
+
+    _, _, minutes, order_id = q.data.split(":", 3)
+    minutes = int(minutes)
+
+    pickup_eta_at = (datetime.utcnow() + timedelta(minutes=minutes)).isoformat()
+
+    service = get_sheets_service()
+    sheet = service.spreadsheets()
+
+    # найти строку заказа
+    rows = sheet.values().get(
+        spreadsheetId=SPREADSHEET_ID,
+        range="orders!A:T",
+    ).execute().get("values", [])
+
+    target_idx = None
+    for i, r in enumerate(rows[1:], start=2):
+        if r and r[0] == order_id:
+            target_idx = i
+            break
+    if not target_idx:
+        return
+
+    sheet.values().batchUpdate(
+        spreadsheetId=SPREADSHEET_ID,
+        body={
+            "valueInputOption": "RAW",
+            "data": [
+                {"range": f"orders!R{target_idx}", "values": [[pickup_eta_at]]},
+                {"range": f"orders!S{target_idx}", "values": [["preset"]]},
+                {"range": f"orders!T{target_idx}", "values": [["courier_requested"]]},
+            ],
+        },
+    ).execute()
+
+    # уведомляем клиента
+    buyer_chat_id = int(rows[target_idx-1][2])
+    await context.bot.send_message(
+        chat_id=buyer_chat_id,
+        text=(
+            "Ваш заказ принят в работу.\n"
+            "Вы можете отслеживать доставку в боте курьерской службы."
+        ),
+    )
+
+    try:
+        await q.message.delete()
+    except Exception:
+        pass
+
+async def on_staff_no_courier(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+
+    chat_id = q.message.chat_id
+    if chat_id not in STAFF_CHAT_IDS:
+        return
+
+    _, _, order_id = q.data.split(":", 2)
+
+    service = get_sheets_service()
+    sheet = service.spreadsheets()
+
+    rows = sheet.values().get(
+        spreadsheetId=SPREADSHEET_ID,
+        range="orders!A:T",
+    ).execute().get("values", [])
+
+    target_idx = None
+    for i, r in enumerate(rows[1:], start=2):
+        if r and r[0] == order_id:
+            target_idx = i
+            break
+    if not target_idx:
+        return
+
+    sheet.values().batchUpdate(
+        spreadsheetId=SPREADSHEET_ID,
+        body={
+            "valueInputOption": "RAW",
+            "data": [
+                {"range": f"orders!T{target_idx}", "values": [["courier_not_requested"]]},
+            ],
+        },
+    ).execute()
+
+    buyer_chat_id = int(rows[target_idx-1][2])
+    await context.bot.send_message(
+        chat_id=buyer_chat_id,
+        text="Ваш заказ принят. Курьер вызываться не будет.",
+    )
+
+    try:
+        await q.message.delete()
+    except Exception:
+        pass
 
 # -------------------------
 # checkout conversation
@@ -2144,7 +2271,17 @@ def main():
         ),
         group=1
     )
-    
+    # -------- WEB API --------
+
+    app.add_handler(
+        CallbackQueryHandler(on_staff_eta, pattern=r"^staff:eta:\d+:")
+    )
+
+    app.add_handler(
+        CallbackQueryHandler(on_staff_no_courier, pattern=r"^staff:no_courier:")
+    )
+
+
     # -------- CALLBACKS (ВСЕ КНОПКИ) --------
 
     # ✅ ЕДИНСТВЕННЫЙ staff handler
@@ -2228,7 +2365,33 @@ def get_categories_from_products(products: list[dict]) -> list[str]:
         if p["available"] and p.get("category")
     })
 
+# -------------------------
+# Web API stub (delivery / zones)
+# -------------------------
 
+def webapi_verify_address(address: str) -> dict:
+    """
+    Заглушка Web API.
+    В будущем здесь будет HTTP-вызов.
+    """
+    return {
+        "ok": True,
+        "zone": "inside",   # inside | outside
+        "distance_km": None,
+        "cached": True,
+    }
+
+
+def webapi_calculate_delivery(cart: dict, address: str) -> dict:
+    """
+    Заглушка расчета доставки.
+    Временно: фиксированная доставка 4000.
+    """
+    return {
+        "ok": True,
+        "price": 4000,
+        "flag": "ok",  # ok | manual | too_far
+    }
 
 if __name__ == "__main__":
     main()
