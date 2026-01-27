@@ -68,6 +68,31 @@ from config import (
     SPREADSHEET_ID,
 )
 HOME_PHOTO_FILE_ID = "AgACAgUAAxkBAAIBWml2tkzPZ3lgBPKTVeeA3Wi9Z3yJAAKuDWsbhLi4VyKeP_hEUISAAQADAgADeQADOAQ"
+
+import requests
+
+WEB_API_URL = os.getenv("WEB_API_URL", "http://localhost:8000")
+WEB_API_KEY = os.getenv("WEB_API_KEY", "DEV_KEY")
+WEB_API_TIMEOUT = 5
+
+def webapi_verify_address(tg_id: int, address: str) -> dict | None:
+    try:
+        resp = requests.post(
+            f"{WEB_API_URL}/api/v1/address/verify",
+            json={"tg_id": tg_id, "address": address},
+            headers={
+                "X-API-KEY": WEB_API_KEY,
+            },
+            timeout=WEB_API_TIMEOUT,
+        )
+        if resp.status_code != 200:
+            log.error(f"WEBAPI verify failed: {resp.status_code} {resp.text}")
+            return None
+        return resp.json()
+    except Exception as e:
+        log.exception(f"WEBAPI verify exception: {e}")
+        return None
+    
 # -------------------------
 # logging
 # -------------------------
@@ -559,6 +584,13 @@ def kb_owner_paid_confirm():
         ]
     ])
 
+def kb_confirm_profile():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Продолжить", callback_data="checkout:profile_ok")],
+        [InlineKeyboardButton("✏️ Изменить данные", callback_data="checkout:profile_edit")],
+        [InlineKeyboardButton("❌ Отмена", callback_data="checkout:cancel")],
+    ])
+
 
 # -------------------------
 # menu button telegram
@@ -999,7 +1031,23 @@ async def on_checkout_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.reply_text("❌ Пожалуйста, введите адрес на корейском.")
             return
 
+        # 🔗 WEB API: verify address
+        verify = webapi_verify_address(update.effective_user.id, text)
+        if not verify or not verify.get("verified"):
+            await msg.reply_text(
+                "❌ Адрес не прошел проверку.\n"
+                "Проверьте написание и попробуйте снова."
+            )
+            return
+
+        # сохраняем результат проверки
         checkout["address"] = text
+        context.user_data["address_verified"] = {
+            "zone": verify.get("zone"),
+            "distance_km": verify.get("distance_km"),
+            "verified_at": datetime.utcnow().isoformat(),
+        }
+
         checkout["step"] = "comment"
 
         m = await context.bot.send_message(
@@ -1011,7 +1059,6 @@ async def on_checkout_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ),
             reply_markup=None,
         )
-        
         return
 
     # --- ЭТАП 3: КОММЕНТАРИЙ ---
@@ -1049,8 +1096,10 @@ async def on_checkout_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # main router (callbacks)
 # -------------------------
 async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
     q = update.callback_query
+    user = q.from_user
+    chat_id = q.message.chat_id
+    
     if q is None:
         return
 
@@ -1131,7 +1180,17 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not checkout or checkout.get("step") != "ready_to_send":
             log.warning("⛔ final_send ignored: wrong checkout state")
             return
-
+        
+            # защита: доставка без verified адреса невозможна
+        if checkout.get("type") == "delivery":
+            if not context.user_data.get("address_verified"):
+                log.warning("⛔ final_send blocked: address not verified")
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text="❌ Адрес доставки не подтвержден. Повторите ввод адреса.",
+                )
+                return
+            
         payment_file_id = checkout.get("payment_photo_file_id")
         if not payment_file_id:
             log.warning("⛔ final_send ignored: no payment photo")
@@ -1155,6 +1214,13 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             comment=comment,
             address=checkout.get("address"),
         )
+
+        save_user_contacts(
+            user_id=user.id,
+            real_name=checkout.get("real_name"),
+            phone_number=checkout.get("phone_number"),
+        )
+
         if not order_id:
             await clear_ui(context, chat_id)
             m = await context.bot.send_message(
@@ -1190,19 +1256,47 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         init_checkout(context)
         checkout = context.user_data["checkout"]
-        checkout["step"] = "ask_name"
 
-        m = await context.bot.send_message(
-            chat_id=chat_id,
-            text=(
-                "✍️ <b>Как вас зовут?</b>\n\n"
-                "Введите ваше имя и фамилию ⬇️"
-            ),
-            parse_mode=ParseMode.HTML,
-            reply_markup=None,
-        )
+        profile = get_user_profile(q.from_user.id)
+        profile = get_user_profile(user.id)
+
+        if profile and profile.get("real_name") and profile.get("phone_number"):
+            checkout.update({
+                "real_name": profile["real_name"],
+                "phone_number": profile["phone_number"],
+                "step": "confirm_profile",
+            })
+            show_confirm_profile()
+            return
+        if profile and profile.get("name") and profile.get("phone"):
+            checkout["real_name"] = profile["name"]
+            checkout["phone_number"] = profile["phone"]
+            checkout["step"] = "confirm_profile"
+
+            await clear_ui(context, chat_id)
+            m = await context.bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    "📋 <b>Ваши данные</b>\n\n"
+                    f"👤 Имя: <b>{profile['name']}</b>\n"
+                    f"📞 Телефон: <b>{profile['phone']}</b>\n\n"
+                    "⚠️ Если данные изменились, нажмите «Изменить данные»."
+                ),
+                parse_mode=ParseMode.HTML,
+                reply_markup=kb_confirm_profile(),
+            )
+            track_msg(context, m.message_id)
+            return
+        else:
+            checkout["step"] = "ask_name"
+
+            m = await context.bot.send_message(
+                chat_id=chat_id,
+                text="✍️ <b>Как вас зовут?</b>\n\nВведите ваше имя и фамилию ⬇️",
+                parse_mode=ParseMode.HTML,
+            )
+            return
         
-        return
 
     if data.startswith("checkout:type:"):
         kind = data.split(":")[-1]
@@ -1271,6 +1365,37 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop("checkout", None)
         context.user_data.pop("step", None)
         await render_cart(context, chat_id)
+        return
+    
+    if data == "checkout:profile_ok":
+        checkout = context.user_data.get("checkout")
+        if not checkout or checkout.get("step") != "confirm_profile":
+            return
+
+        checkout["step"] = "type"
+
+        m = await context.bot.send_message(
+            chat_id=chat_id,
+            text="🚚 <b>Выберите способ получения:</b>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb_checkout_pickup_delivery(),
+        )
+        track_msg(context, m.message_id)
+        return
+    
+    if data == "checkout:profile_edit":
+        checkout = context.user_data.get("checkout")
+        if not checkout:
+            return
+
+        checkout["step"] = "ask_name"
+
+        m = await context.bot.send_message(
+            chat_id=chat_id,
+            text="✍️ <b>Как вас зовут?</b>\n\nВведите ваше имя и фамилию ⬇️",
+            parse_mode=ParseMode.HTML,
+        )
+        track_msg(context, m.message_id)
         return
 
 async def on_buyer_payment_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1977,8 +2102,8 @@ async def on_owner_commission_paid(update: Update, context: ContextTypes.DEFAULT
             except Exception:
                 pass
 
-            if len(r) > 26 and r[26]:
-                dates.append(r[26])  # delivery_confirmed_at
+            if len(r) > 1 and r[1]:
+                dates.append(r[1])  # created_at
 
             unpaid_rows.append(r)
 
@@ -2097,6 +2222,23 @@ async def on_owner_commission_paid_cancel(update: Update, context: ContextTypes.
         await q.message.delete()
     except Exception:
         pass
+
+def get_user_profile(user_id: int) -> dict | None:
+    service = get_sheets_service()
+    sheet = service.spreadsheets()
+
+    rows = sheet.values().get(
+        spreadsheetId=SPREADSHEET_ID,
+        range="users!A:F",
+    ).execute().get("values", [])
+
+    for r in rows:
+        if r and r[0] == str(user_id):
+            return {
+                "name": r[4] if len(r) > 4 else "",
+                "phone": r[5] if len(r) > 5 else "",
+            }
+    return None
 
 # -------------------------
 # checkout conversation
@@ -2382,7 +2524,27 @@ async def on_staff_description(update: Update, context: ContextTypes.DEFAULT_TYP
     await update.message.reply_text("✅ Описание сохранено.")
     await catalog_cmd(update, context)
 
+_KITCHEN_CACHE = {"address": None, "loaded_at": 0}
 
+def get_kitchen_address_cached(ttl=300):
+    now = time.time()
+    if _KITCHEN_CACHE["address"] and now - _KITCHEN_CACHE["loaded_at"] < ttl:
+        return _KITCHEN_CACHE["address"]
+
+    service = get_sheets_service()
+    sheet = service.spreadsheets()
+    rows = sheet.values().get(
+        spreadsheetId=SPREADSHEET_ID,
+        range="kitchen!A:B",
+    ).execute().get("values", [])
+
+    for r in rows:
+        if len(r) >= 2 and r[0] == "address":
+            _KITCHEN_CACHE["address"] = r[1]
+            _KITCHEN_CACHE["loaded_at"] = now
+            return r[1]
+
+    return None
 
 # -------------------------
 # main/helpers
