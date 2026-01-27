@@ -148,11 +148,17 @@ def set_product_price(product_id: str, price: int):
     if row_index is None:
         return False
 
-    sheet.values().update(
+    customer_price = calc_customer_price(price)
+
+    sheet.values().batchUpdate(
         spreadsheetId=SPREADSHEET_ID,
-        range=f"products!C{row_index}",
-        valueInputOption="RAW",
-        body={"values": [[price]]},
+        body={
+            "valueInputOption": "RAW",
+            "data": [
+                {"range": f"products!C{row_index}", "values": [[price]]},
+                {"range": f"products!M{row_index}", "values": [[customer_price]]},
+            ],
+        },
     ).execute()
 
     return True
@@ -176,6 +182,14 @@ def _get_nav(context: ContextTypes.DEFAULT_TYPE) -> Dict[str, str]:
 
 def _fmt_money(krw: int) -> str:
     return f"{krw:,}₩"
+
+def calc_customer_price(owner_price: int) -> int:
+    """
+    customer_price = owner_price + 10%
+    округление вверх до 100 вон
+    """
+    raw = int(owner_price * 1.1)
+    return ((raw + 99) // 100) * 100
 
 def safe_open_photo(path: str):
     try:
@@ -240,14 +254,18 @@ def append_product_to_sheets(name: str, price: int, category: str, description: 
 
     product_id = f"P{uuid4().hex[:10]}"
 
+    customer_price = calc_customer_price(price)
+
     row = [
         product_id,          # A
         name,                # B
-        price,               # C
-        "TRUE",              # D available
+        price,               # C owner_price
+        "TRUE",              # D
         category,            # E
-        "",                  # F photo_file_id
+        "",                  # F photo
         description or "",   # G
+        "", "", "", "", "",  # H–L
+        customer_price,      # M customer_price
     ]
 
     try:
@@ -645,7 +663,7 @@ async def send_category_preview(
         media.append(
             InputMediaPhoto(
                 media=p["photo_file_id"],
-                caption=f"💐 <b>{p['name']}</b>\n{_fmt_money(p['price'])}",
+                caption=f"💐 <b>{p['name']}</b>\n{_fmt_money(p['customer_price'])}",
                 parse_mode=ParseMode.HTML,
             )
         )
