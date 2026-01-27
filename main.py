@@ -510,6 +510,12 @@ def kb_retry_courier(order_id: str) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🔁 Повторить отправку курьеру", callback_data=f"staff:courier_retry:{order_id}")]
     ])
 
+def kb_owner_paid():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Оплачено", callback_data="owner:commission_paid")]
+    ])
+
+
 # -------------------------
 # menu button telegram
 # -------------------------
@@ -774,6 +780,14 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def dash_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
 
+    if chat_id == ADMIN_CHAT_ID_INT and owner_debt > 0:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="Получены деньги от владельца. Закрыть период?",
+            reply_markup=kb_owner_paid(),
+        )
+
+
     if chat_id != OWNER_CHAT_ID_INT:
         return
 
@@ -782,7 +796,7 @@ async def dash_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     result = sheet.values().get(
         spreadsheetId=SPREADSHEET_ID,
-        range="orders!A:O",
+        range="orders!A:AC",
     ).execute()
 
     rows = result.get("values", [])
@@ -842,6 +856,17 @@ async def dash_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if reaction_times else 0
     )
 
+    owner_debt = 0
+
+    for r in rows[1:]:
+        # AB = 27, AC = 28 (0-based)
+        if len(r) > 28 and r[28] == "unpaid":
+            try:
+                owner_debt += int(r[27])
+            except Exception:
+                pass
+
+
     text = (
         "📊 <b>Дашборд владельца</b>\n\n"
         "💰 <b>Выручка</b>\n"
@@ -854,6 +879,8 @@ async def dash_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"• Отклонены: <b>{rejected}</b>\n\n"
         "⏱ <b>Среднее время реакции</b>\n"
         f"• {avg_reaction_min:.1f} мин"
+        "\n\n💸 <b>Сервисный сбор</b>\n"
+        f"• К оплате: <b>{_fmt_money(owner_debt)}</b>"
     )
 
     await context.bot.send_message(
@@ -1870,6 +1897,49 @@ async def on_staff_courier_retry(update: Update, context: ContextTypes.DEFAULT_T
 
     await send_to_courier_and_persist(rows[target_idx - 1], target_idx)
 
+async def on_owner_commission_paid(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+
+    # ⛔️ ТОЛЬКО АДМИН МОЖЕТ ЗАКРЫТЬ ПЕРИОД
+    if q.message.chat_id != ADMIN_CHAT_ID_INT:
+        return
+
+    service = get_sheets_service()
+    sheet = service.spreadsheets()
+
+    rows = sheet.values().get(
+        spreadsheetId=SPREADSHEET_ID,
+        range="orders!A:AC",
+    ).execute().get("values", [])
+
+    updates = []
+    for i, r in enumerate(rows[1:], start=2):
+        if len(r) > 28 and r[28] == "unpaid":
+            updates.append(
+                {"range": f"orders!AC{i}", "values": [["paid"]]}
+            )
+
+    if updates:
+        sheet.values().batchUpdate(
+            spreadsheetId=SPREADSHEET_ID,
+            body={
+                "valueInputOption": "RAW",
+                "data": updates,
+            },
+        ).execute()
+
+    await context.bot.send_message(
+        chat_id=ADMIN_CHAT_ID_INT,
+        text="✅ Комиссия отмечена как оплаченная. Период закрыт.",
+    )
+
+    try:
+        await q.message.delete()
+    except Exception:
+        pass
+
+
 # -------------------------
 # checkout conversation
 # -------------------------
@@ -2642,6 +2712,11 @@ def main():
             pattern=r"^staff:eta_manual:"
         )
     )
+
+    app.add_handler(
+    CallbackQueryHandler(on_owner_commission_paid, pattern=r"^owner:commission_paid$")
+)
+
 
     app.add_handler(
         CallbackQueryHandler(on_staff_courier_retry, pattern=r"^staff:courier_retry:")
