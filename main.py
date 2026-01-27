@@ -845,19 +845,27 @@ async def dash_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # -------------------------
 
 async def on_checkout_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    log.info(
+        f"[CHECKOUT REPLY] chat={update.effective_chat.id} "
+        f"text={update.message.text!r} "
+        f"step={context.user_data.get('checkout')}"
+    )
     if update.effective_chat.id in STAFF_CHAT_IDS:
         return
 
-    if not context.user_data.get("checkout_step"):
+    checkout = context.user_data.get("checkout")
+    if not checkout:
         return
-    
+
+    step = checkout.get("step")
+
+
     msg = update.message
-    if not msg or not msg.reply_to_message:
+    if not msg:
         return
 
     chat_id = msg.chat_id
     text = (msg.text or "").strip()
-    step = context.user_data.get("checkout_step")
 
     # --- ЭТАП 1: ИМЯ ---
     if step == "ask_name":
@@ -865,11 +873,9 @@ async def on_checkout_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.reply_text("❌ Пожалуйста, введите имя.")
             return
 
-        checkout = context.user_data.setdefault("checkout", {})
         checkout["real_name"] = text
-        context.user_data["checkout_step"] = "ask_phone"
+        checkout["step"] = "ask_phone"
 
-        await clear_ui(context, chat_id)
         m = await context.bot.send_message(
             chat_id=chat_id,
             text=(
@@ -877,9 +883,9 @@ async def on_checkout_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "Введите номер для связи ⬇️"
             ),
             parse_mode=ParseMode.HTML,
-            reply_markup=ForceReply(selective=True),
+            reply_markup=None,
         )
-        track_msg(context, m.message_id)
+        
         return
 
     # --- ЭТАП 2: ТЕЛЕФОН ---
@@ -888,18 +894,9 @@ async def on_checkout_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.reply_text("❌ Пожалуйста, введите номер телефона.")
             return
 
-        checkout = context.user_data.setdefault("checkout", {})
         checkout["phone_number"] = text
+        checkout["step"] = "type"
 
-        save_user_contacts(
-            user_id=msg.from_user.id,
-            real_name=checkout.get("real_name"),
-            phone_number=text,
-        )
-
-        context.user_data["checkout_step"] = "type"
-
-        await clear_ui(context, chat_id)
         m = await context.bot.send_message(
             chat_id=chat_id,
             text="🚚 <b>Выберите способ получения:</b>",
@@ -915,12 +912,9 @@ async def on_checkout_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.reply_text("❌ Пожалуйста, введите адрес на корейском.")
             return
 
-        checkout = context.user_data.setdefault("checkout", {})
         checkout["address"] = text
+        checkout["step"] = "comment"
 
-        context.user_data["checkout_step"] = "comment"
-
-        await clear_ui(context, chat_id)
         m = await context.bot.send_message(
             chat_id=chat_id,
             text=(
@@ -928,9 +922,9 @@ async def on_checkout_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "• Например: удобное время доставки\n\n"
                 "⬇️ Ответьте на это сообщение"
             ),
-            reply_markup=ForceReply(selective=True),
+            reply_markup=None,
         )
-        track_msg(context, m.message_id)
+        
         return
 
     # --- ЭТАП 3: КОММЕНТАРИЙ ---
@@ -941,9 +935,8 @@ async def on_checkout_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text("✍️ Напишите комментарий или '-'")
         return
 
-    checkout = context.user_data.setdefault("checkout", {})
     checkout["comment"] = text
-    context.user_data["checkout_step"] = "preview"
+    checkout["step"] = "preview"
 
     cart = _get_cart(context)
     kind = checkout.get("type", "pickup")
@@ -969,6 +962,7 @@ async def on_checkout_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # main router (callbacks)
 # -------------------------
 async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
     q = update.callback_query
     if q is None:
         return
@@ -1047,15 +1041,10 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "checkout:final_send":
         checkout = context.user_data.get("checkout")
-        if not checkout:
+        if not checkout or checkout.get("step") != "ready_to_send":
+            log.warning("⛔ final_send ignored: wrong checkout state")
             return
 
-        # 1) строгая проверка шага
-        if not checkout.get("payment_photo_file_id"):
-            log.warning("⛔ final_send ignored: no payment photo")
-            return
-
-        # 2) обязательные данные
         payment_file_id = checkout.get("payment_photo_file_id")
         if not payment_file_id:
             log.warning("⛔ final_send ignored: no payment photo")
@@ -1072,7 +1061,6 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         user = q.from_user
 
-        # 3) создаем заказ
         order_id = save_order_to_sheets(
             user=user,
             cart=cart,
@@ -1090,40 +1078,10 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             track_msg(context, m.message_id)
             return
 
-        # 4) сохраняем payment_proof + статус pending
-        service = get_sheets_service()
-        sheet = service.spreadsheets()
-
-        result = sheet.values().get(
-            spreadsheetId=SPREADSHEET_ID,
-            range="orders!A:O",
-        ).execute()
-        rows = result.get("values", [])
-
-        target_row = None
-        for idx, row in enumerate(rows, start=1):
-            if row and row[0] == order_id:
-                target_row = idx
-                break
-
-        if target_row:
-            sheet.values().batchUpdate(
-                spreadsheetId=SPREADSHEET_ID,
-                body={
-                    "valueInputOption": "RAW",
-                    "data": [
-                        {"range": f"orders!I{target_row}", "values": [[payment_file_id]]},
-                        {"range": f"orders!J{target_row}", "values": [["pending"]]},
-                    ],
-                },
-            ).execute()
-
-        # 6) чистим state
+        # cleanup
         context.user_data.pop("checkout", None)
-        context.user_data.pop("checkout_step", None)
         context.user_data["cart"] = {}
 
-        # 7) финал покупателю
         await clear_ui(context, chat_id)
         m = await context.bot.send_message(
             chat_id=chat_id,
@@ -1143,10 +1101,10 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await render_cart(context, chat_id)
             return
 
-        context.user_data["checkout"] = {}
-        context.user_data["checkout_step"] = "ask_name"
+        init_checkout(context)
+        checkout = context.user_data["checkout"]
+        checkout["step"] = "ask_name"
 
-        await clear_ui(context, chat_id)
         m = await context.bot.send_message(
             chat_id=chat_id,
             text=(
@@ -1154,9 +1112,9 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "Введите ваше имя и фамилию ⬇️"
             ),
             parse_mode=ParseMode.HTML,
-            reply_markup=ForceReply(selective=True),
+            reply_markup=None,
         )
-        track_msg(context, m.message_id)
+        
         return
 
     if data.startswith("checkout:type:"):
@@ -1165,11 +1123,9 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         checkout = context.user_data.setdefault("checkout", {})
         checkout["type"] = kind
 
-        await clear_ui(context, chat_id)
-
         # 🚚 ДОСТАВКА → СПРАШИВАЕМ АДРЕС
         if kind == "delivery":
-            context.user_data["checkout_step"] = "ask_address"
+            checkout["step"] = "ask_address"
 
             m = await context.bot.send_message(
                 chat_id=chat_id,
@@ -1179,24 +1135,25 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "Это нужно для правильной навигации курьера ⬇️"
                 ),
                 parse_mode=ParseMode.HTML,
-                reply_markup=ForceReply(selective=True),
+                reply_markup=None,
             )
-            track_msg(context, m.message_id)
+            
             return
 
         # 🚶 САМОВЫВОЗ → СРАЗУ К КОММЕНТАРИЮ
-        context.user_data["checkout_step"] = "comment"
+        checkout["step"] = "comment"
 
         m = await context.bot.send_message(
             chat_id=chat_id,
             text=(
-                "✍️ Напишите комментарий к заказу.\n\n"
-                "• Укажите удобное время самовывоза\n\n"
-                "⬇️ Ответьте на это сообщение"
+                "💬 <b>Комментарий к заказу</b>\n\n"
+                "Если есть пожелания, напишите их сообщением ниже.\n"
+                "Если комментарий не нужен, просто отправьте «-» ⬇️"
             ),
-            reply_markup=ForceReply(selective=True),
+            parse_mode=ParseMode.HTML,
+            reply_markup=None,
         )
-        track_msg(context, m.message_id)
+        
         return
     
     if data == "checkout:attach":
@@ -1214,25 +1171,25 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "Нажмите 📎 внизу экрана ⬇️"
             ),
             parse_mode=ParseMode.HTML,
-            reply_markup=ForceReply(selective=True),
+            reply_markup=None,
         )
 
-        context.user_data["checkout_step"] = "wait_photo"
+        checkout["step"] = "wait_photo"
         checkout["photo_reply_to"] = m.message_id
-        track_msg(context, m.message_id)
+        
         return
 
 
     if data == "checkout:cancel":
         context.user_data.pop("checkout", None)
-        context.user_data.pop("checkout_step", None)
+        context.user_data.pop("step", None)
         await render_cart(context, chat_id)
         return
 
 async def on_buyer_payment_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log.info("📸 BUYER PAYMENT PHOTO HANDLER FIRED")
     msg = update.message
-    if not msg or not msg.photo or not msg.reply_to_message:
+    if not msg or not msg.photo:
         return
 
     chat_id = msg.chat_id
@@ -1240,19 +1197,31 @@ async def on_buyer_payment_photo(update: Update, context: ContextTypes.DEFAULT_T
         return
 
     checkout = context.user_data.get("checkout")
-    if not checkout:
-        return
-
-    if context.user_data.get("checkout_step") != "wait_photo":
+    if not checkout or checkout.get("step") != "wait_photo":
         return
 
     expected_reply_to = checkout.get("photo_reply_to")
-    if msg.reply_to_message.message_id != expected_reply_to:
-        return
+
+    # reply_to у фото может отсутствовать, даже если ForceReply был
+    if expected_reply_to:
+        if msg.reply_to_message is not None:
+            if msg.reply_to_message.message_id != expected_reply_to:
+                return
+    # если reply_to_message нет, но мы в wait_photo, принимаем фото все равно
 
     # берем самое большое фото
     file_id = msg.photo[-1].file_id
     checkout["payment_photo_file_id"] = file_id
+
+    # уведомляем стаф, но не стопим поток если кто-то не может принять сообщение
+    for staff_id in STAFF_CHAT_IDS:
+        try:
+            await context.bot.send_message(
+                chat_id=staff_id,
+                text="📸 Пришел скрин оплаты"
+            )
+        except Exception as e:
+            log.error(f"❌ failed to notify staff {staff_id}: {e}")
 
     # показываем подтверждение + кнопку отправки
     cart = _get_cart(context)
@@ -1276,11 +1245,11 @@ async def on_buyer_payment_photo(update: Update, context: ContextTypes.DEFAULT_T
             + preview_text
         ),
         parse_mode=ParseMode.HTML,
-        reply_markup=kb_checkout_send(),  # сделаем на следующем шаге
+        reply_markup=kb_checkout_send(),
     )
     track_msg(context, m.message_id)
 
-    context.user_data["checkout_step"] = "ready_to_send"
+    checkout["step"] = "ready_to_send"
 
 async def on_staff_decision(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -1437,7 +1406,7 @@ async def on_catalog_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(
             chat_id=chat_id,
             text="➕ Добавление товара\n\nВведите название товара:",
-            reply_markup=ForceReply(selective=True),
+            reply_markup=None,
         )
         return 
 
@@ -1708,6 +1677,18 @@ async def on_staff_description(update: Update, context: ContextTypes.DEFAULT_TYP
 # -------------------------
 # main/helpers
 # -------------------------
+
+def init_checkout(context):
+    context.user_data["checkout"] = {
+        "step": None,
+        "real_name": None,
+        "phone_number": None,
+        "type": None,          # pickup | delivery
+        "address": None,
+        "comment": None,
+        "payment_photo_file_id": None,
+    }
+
 
 def set_product_description(product_id: str, description: str):
     service = get_sheets_service()
@@ -2155,13 +2136,29 @@ def main():
     app.add_handler(CommandHandler("catalog", catalog_cmd))
     app.add_handler(CommandHandler("dash", dash_cmd))
 
-    # -------- CALLBACKS (ВСЕ КНОПКИ) --------
-
+    # -------- BUYER TEXT (checkout replies) --------
     app.add_handler(
         MessageHandler(
-            (filters.PHOTO | filters.Document.IMAGE)
-            & ~filters.Chat(STAFF_CHAT_IDS),
-            on_buyer_payment_photo
+            filters.TEXT & ~filters.COMMAND & ~filters.Chat(STAFF_CHAT_IDS),
+            on_checkout_reply
+        ),
+        group=1
+    )
+    
+    # -------- CALLBACKS (ВСЕ КНОПКИ) --------
+
+    # ✅ ЕДИНСТВЕННЫЙ staff handler
+    app.add_handler(
+        CallbackQueryHandler(
+            staff_callback,
+            pattern=r"^staff:(approve|reject):"
+        )
+    )
+
+    app.add_handler(
+        CallbackQueryHandler(
+            on_catalog_toggle,
+            pattern=r"^catalog:"
         )
     )
 
@@ -2173,20 +2170,12 @@ def main():
     )
 
     app.add_handler(
-        CallbackQueryHandler(
-            on_catalog_toggle,
-            pattern=r"^catalog:"
+        MessageHandler(
+            (filters.PHOTO | filters.Document.IMAGE)
+            & ~filters.Chat(STAFF_CHAT_IDS),
+            on_buyer_payment_photo
         )
     )
-
-    # ✅ ЕДИНСТВЕННЫЙ staff handler
-    app.add_handler(
-        CallbackQueryHandler(
-            staff_callback,
-            pattern=r"^staff:(approve|reject):"
-        )
-    )
-
     # -------- STAFF --------
     app.add_handler(
         MessageHandler(
