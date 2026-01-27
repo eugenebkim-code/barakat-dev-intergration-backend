@@ -210,18 +210,35 @@ def read_products_from_sheets() -> list[dict]:
     products: list[dict] = []
 
     for row in rows:
+        # минимально нужные поля: id, name, owner_price, available, category
         if len(row) < 5:
             continue
+
+        try:
+            owner_price = int(row[2])
+        except Exception:
+            continue  # битая строка, пропускаем
+
+        # customer_price:
+        # 1) если колонка M есть и заполнена
+        # 2) иначе считаем по формуле
+        if len(row) > 12 and row[12]:
+            try:
+                customer_price = int(row[12])
+            except Exception:
+                customer_price = calc_customer_price(owner_price)
+        else:
+            customer_price = calc_customer_price(owner_price)
 
         products.append({
             "product_id": row[0],
             "name": row[1],
-            "owner_price": int(row[2]),
+            "owner_price": owner_price,
+            "customer_price": customer_price,
             "available": row[3].lower() == "true",
             "category": row[4],
             "photo_file_id": row[5] if len(row) > 5 else None,
             "description": row[6] if len(row) > 6 else None,
-            "customer_price": int(row[12]),
         })
 
     return products
