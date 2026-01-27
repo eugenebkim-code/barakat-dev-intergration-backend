@@ -548,7 +548,15 @@ def kb_retry_courier(order_id: str) -> InlineKeyboardMarkup:
 
 def kb_owner_paid():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ Оплачено", callback_data="owner:commission_paid")]
+        [InlineKeyboardButton("✅ Оплачено", callback_data="owner:commission_paid_confirm")]
+    ])
+
+def kb_owner_paid_confirm():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ Да, закрыть период", callback_data="owner:commission_paid_apply"),
+            InlineKeyboardButton("❌ Отмена", callback_data="owner:commission_paid_cancel"),
+        ]
     ])
 
 
@@ -1948,6 +1956,12 @@ async def on_owner_commission_paid(update: Update, context: ContextTypes.DEFAULT
     if q.message.chat_id != ADMIN_CHAT_ID_INT:
         return
 
+    if q.data != "owner:commission_paid_apply":
+        return
+    
+    q = update.callback_query
+    await q.answer()
+
     service = get_sheets_service()
     sheet = service.spreadsheets()
 
@@ -2032,6 +2046,61 @@ async def on_owner_commission_paid(update: Update, context: ContextTypes.DEFAULT
     except Exception:
         pass
 
+async def on_owner_commission_paid_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+
+    if q.message.chat_id != ADMIN_CHAT_ID_INT:
+        return
+
+    service = get_sheets_service()
+    sheet = service.spreadsheets()
+
+    rows = sheet.values().get(
+        spreadsheetId=SPREADSHEET_ID,
+        range="orders!A:AC",
+    ).execute().get("values", [])
+
+    orders_count = 0
+    total_amount = 0
+
+    for r in rows[1:]:
+        if len(r) > 28 and r[28] == "unpaid":
+            orders_count += 1
+            try:
+                total_amount += int(r[27])
+            except Exception:
+                pass
+
+    if orders_count == 0:
+        await q.answer("Нет задолженности", show_alert=True)
+        return
+
+    await context.bot.send_message(
+        chat_id=ADMIN_CHAT_ID_INT,
+        text=(
+            "⚠️ <b>Подтверждение закрытия периода</b>\n\n"
+            f"📦 Заказов: <b>{orders_count}</b>\n"
+            f"💰 Сумма: <b>{_fmt_money(total_amount)}</b>\n\n"
+            "Закрыть период и отметить оплату?"
+        ),
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb_owner_paid_confirm(),
+    )
+
+    try:
+        await q.message.delete()
+    except Exception:
+        pass
+
+async def on_owner_commission_paid_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer("Отменено")
+
+    try:
+        await q.message.delete()
+    except Exception:
+        pass
 
 # -------------------------
 # checkout conversation
@@ -2813,6 +2882,27 @@ def main():
 
     app.add_handler(
         CallbackQueryHandler(on_staff_courier_retry, pattern=r"^staff:courier_retry:")
+    )
+
+    app.add_handler(
+        CallbackQueryHandler(
+            on_owner_commission_paid_confirm,
+            pattern=r"^owner:commission_paid_confirm$"
+        )
+    )
+
+    app.add_handler(
+        CallbackQueryHandler(
+            on_owner_commission_paid,
+            pattern=r"^owner:commission_paid_apply$"
+        )
+    )
+
+    app.add_handler(
+        CallbackQueryHandler(
+            on_owner_commission_paid_cancel,
+            pattern=r"^owner:commission_paid_cancel$"
+        )
     )
 
     # -------- CALLBACKS (ВСЕ КНОПКИ) --------
