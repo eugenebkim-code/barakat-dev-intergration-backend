@@ -82,7 +82,7 @@ load_dotenv()
 
 from telegram.ext import CallbackQueryHandler
 from staff_callbacks import staff_callback
-
+from keyboards_staff import kb_staff_pickup_eta
 from config import (
     BOT_TOKEN,
     OWNER_CHAT_ID_INT,
@@ -436,26 +436,6 @@ def kb_staff_order(order_id: str) -> InlineKeyboardMarkup:
             InlineKeyboardButton("❌ Отклонить", callback_data=f"staff:reject:{order_id}"),
         ]
     ])
-
-def kb_staff_pickup_eta(order_id: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("10 мин", callback_data=f"staff:eta:10:{order_id}"),
-            InlineKeyboardButton("20 мин", callback_data=f"staff:eta:20:{order_id}"),
-            InlineKeyboardButton("30 мин", callback_data=f"staff:eta:30:{order_id}"),
-        ],
-        [
-            InlineKeyboardButton("45 мин", callback_data=f"staff:eta:45:{order_id}"),
-            InlineKeyboardButton("60 мин", callback_data=f"staff:eta:60:{order_id}"),
-        ],
-        [
-            InlineKeyboardButton("🕒 Указать дату и время", callback_data=f"staff:eta_manual:{order_id}"),
-        ],
-        [
-            InlineKeyboardButton("❌ Не вызывать курьера", callback_data=f"staff:no_courier:{order_id}"),
-        ],
-    ])
-
 
 def set_waiting_photo(context: ContextTypes.DEFAULT_TYPE, product_id: str):
     context.user_data["waiting_photo_for"] = product_id
@@ -2136,19 +2116,6 @@ async def on_staff_eta_manual_click(update: Update, context: ContextTypes.DEFAUL
     except Exception:
         pass
 
-
-def build_courier_payload(order_row: list) -> dict:
-    return {
-        "order_id": order_row[0],
-        "pickup_address": "KITCHEN_ADDRESS",  # позже из Sheets кухни
-        "dropoff_address": order_row[13] if len(order_row) > 13 else "",
-        "pickup_eta_at": order_row[17] if len(order_row) > 17 else "",
-        "customer": {
-            "name": "",   # можно подтянуть из users
-            "phone": "",
-        },
-        "comment": order_row[7] if len(order_row) > 7 else "",
-    }
 
 import httpx
 import time
