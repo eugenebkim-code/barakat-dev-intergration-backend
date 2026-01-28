@@ -26,6 +26,29 @@ from datetime import datetime, timedelta
 import json
 from google.oauth2.service_account import Credentials
 
+# -------------------------
+# Web API client (safe import)
+# -------------------------
+
+try:
+    from webapi_client import webapi_create_order
+    WEBAPI_AVAILABLE = True
+except ImportError:
+    WEBAPI_AVAILABLE = False
+
+    async def webapi_create_order(payload: dict) -> dict:
+        log.warning("⚠️ Web API unavailable, using STUB webapi_create_order")
+        return {
+            "status": "ok",
+            "order_id": payload.get("order_id"),
+            "address": {
+                "verified": True,
+                "mode": "stub",
+            },
+            "next": "courier_stubbed",
+        }
+
+
 from telegram import (
     Update,
     InlineKeyboardButton,
@@ -75,22 +98,28 @@ WEB_API_URL = os.getenv("WEB_API_URL", "http://localhost:8000")
 WEB_API_KEY = os.getenv("WEB_API_KEY", "DEV_KEY")
 WEB_API_TIMEOUT = 5
 
-def webapi_verify_address(tg_id: int, address: str) -> dict | None:
+def webapi_check_address(city: str, address: str) -> dict | None:
     try:
         resp = requests.post(
-            f"{WEB_API_URL}/api/v1/address/verify",
-            json={"tg_id": tg_id, "address": address},
+            f"{WEB_API_URL}/api/v1/address/check",
+            json={
+                "city": city,
+                "address": address,
+            },
             headers={
                 "X-API-KEY": WEB_API_KEY,
             },
             timeout=WEB_API_TIMEOUT,
         )
+
         if resp.status_code != 200:
-            log.error(f"WEBAPI verify failed: {resp.status_code} {resp.text}")
+            log.error(f"WEBAPI address check failed: {resp.status_code} {resp.text}")
             return None
+
         return resp.json()
+
     except Exception as e:
-        log.exception(f"WEBAPI verify exception: {e}")
+        log.exception(f"WEBAPI address check exception: {e}")
         return None
     
 # -------------------------
@@ -321,7 +350,16 @@ def append_product_to_sheets(name: str, price: int, category: str, description: 
     except Exception:
         return None
 
-def save_order_to_sheets(user, cart: dict, kind: str, comment: str, address: str | None = None, order_id: str | None = None) -> str | None:
+def save_order_to_sheets(
+    user,
+    cart: dict,
+    kind: str,
+    comment: str,
+    address: str | None = None,
+    order_id: str | None = None,
+    external_delivery_ref: str | None = None,
+) -> str | None:
+    
     service = get_sheets_service()
     sheet = service.spreadsheets()
 
@@ -356,13 +394,19 @@ def save_order_to_sheets(user, cart: dict, kind: str, comment: str, address: str
         kind,
         comment or "",
         "",
-        "created",          # ← статус
+        "created",
         "",
         "",
         "",
         address or "",
         delivery_fee,
-        "stub",             # ← delivery_fee_source (новая колонка P)
+        "stub",
+        "",                     # Q
+        "",                     # R
+        "",                     # S
+        "",                     # T
+        "",                     # U
+        external_delivery_ref,  # V  ← ВАЖНО
     ]]
 
     try:
@@ -1026,21 +1070,17 @@ async def on_checkout_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         # 🔗 WEB API: verify address
-        verify = webapi_verify_address(update.effective_user.id, text)
-        if not verify or not verify.get("verified"):
+        city_code = get_kitchen_city_cached() or "unknown"
+        check = webapi_check_address(city_code, text)
+        if not check or not check.get("ok"):
             await msg.reply_text(
                 "❌ Адрес не прошел проверку.\n"
                 "Проверьте написание и попробуйте снова."
             )
             return
 
-        # сохраняем результат проверки
-        checkout["address"] = text
-        context.user_data["address_verified"] = {
-            "zone": verify.get("zone"),
-            "distance_km": verify.get("distance_km"),
-            "verified_at": datetime.utcnow().isoformat(),
-        }
+        checkout["address"] = check.get("normalized_address", text)
+        context.user_data["address_verified"] = True
 
         checkout["step"] = "comment"
 
@@ -1177,17 +1217,20 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
             # защита: доставка без verified адреса невозможна
         if checkout.get("type") == "delivery":
-            if not context.user_data.get("address_verified"):
+            if context.user_data.get("address_verified") is not True:
                 log.warning("⛔ final_send blocked: address not verified")
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text="❌ Адрес доставки не подтвержден. Повторите ввод адреса.",
-            )
-            return
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text="❌ Адрес доставки не подтвержден. Повторите ввод адреса.",
+                )
+                return
             
         payment_file_id = checkout.get("payment_photo_file_id")
         if not payment_file_id:
-            log.warning("⛔ final_send ignored: no payment photo")
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="❌ Сначала прикрепите скриншот оплаты.",
+            )
             return
 
         cart = _get_cart(context)
@@ -1203,9 +1246,17 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         
         import uuid
-        from webapi_client import webapi_create_order
-
+        
         order_id = str(uuid.uuid4())
+
+        pickup_address = get_kitchen_address_cached()
+        city_code = get_kitchen_city_cached()
+
+        if not pickup_address:
+            pickup_address = "KITCHEN_ADDRESS_NOT_SET"
+
+        if not city_code:
+            city_code = "CITY_NOT_SET"
 
         order_payload = {
             "order_id": order_id,
@@ -1213,12 +1264,23 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "client_tg_id": user.id,
             "client_name": checkout.get("real_name"),
             "client_phone": checkout.get("phone_number"),
-            "pickup_address": KITCHEN_ADDRESS,
+            "pickup_address": pickup_address,
             "delivery_address": checkout.get("address", ""),
-            "pickup_eta_at": pickup_eta_at,
-            "city": CITY_CODE,
+            "city": city_code,
             "comment": comment,
         }
+
+        # --- Web API create order ---
+        try:
+            from webapi_client import webapi_create_order
+        except ImportError:
+            log.warning("⚠️ webapi_create_order not available, using stub")
+
+            async def webapi_create_order(payload):
+                return {
+                    "status": "ok",
+                    "external_delivery_ref": None,  # НОРМА для самовывоза
+                }
 
         try:
             resp = await webapi_create_order(order_payload)
@@ -1230,23 +1292,44 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        if resp.get("status") != "ok":
+        if not resp or resp.get("status") != "ok":
             await context.bot.send_message(
                 chat_id=chat_id,
-                text="❌ Заказ не принят системой. Повторите попытку.",
+                text="❌ Заказ не принят системой. Попробуйте позже.",
             )
             return
+
+        # ⬇️ ВАЖНО: stub / самовывоз / dev режим
+        external_delivery_ref = resp.get("external_delivery_ref")
+
+        is_stub = resp.get("external_delivery_ref") is None
+
+        if checkout.get("type") == "delivery":
+            if not is_stub and not external_delivery_ref:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text="❌ Не удалось создать доставку. Попробуйте позже.",
+                )
+                return
+
+        # самовывоз — НИКАКОЙ доставки
+        if kind == "pickup":
+            external_delivery_ref = None
+        elif is_stub:
+            external_delivery_ref = "STUB"
+        else:
+            external_delivery_ref = resp.get("external_delivery_ref")
 
         # ⬇️ ТОЛЬКО ТЕПЕРЬ пишем в Sheets
         saved = save_order_to_sheets(
             user=user,
             cart=cart,
-            kind=kind_label,
+            kind=kind_label,  # "Самовывоз" или "Доставка"
             comment=comment,
             address=checkout.get("address"),
             order_id=order_id,
         )
-
+        await notify_staff(context.bot, order_id)
         save_user_contacts(
             user_id=user.id,
             real_name=checkout.get("real_name"),
@@ -1446,15 +1529,7 @@ async def on_buyer_payment_photo(update: Update, context: ContextTypes.DEFAULT_T
     file_id = msg.photo[-1].file_id
     checkout["payment_photo_file_id"] = file_id
 
-    # уведомляем стаф, но не стопим поток если кто-то не может принять сообщение
-    for staff_id in STAFF_CHAT_IDS:
-        try:
-            await context.bot.send_message(
-                chat_id=staff_id,
-                text="📸 Пришел скрин оплаты"
-            )
-        except Exception as e:
-            log.error(f"❌ failed to notify staff {staff_id}: {e}")
+
 
     # показываем подтверждение + кнопку отправки
     cart = _get_cart(context)
@@ -1483,6 +1558,10 @@ async def on_buyer_payment_photo(update: Update, context: ContextTypes.DEFAULT_T
     track_msg(context, m.message_id)
 
     checkout["step"] = "ready_to_send"
+    context.user_data["checkout"] = checkout
+    log.error(
+        f"PHOTO SAVED: {context.user_data.get('checkout')}"
+    )
 
 async def on_staff_decision(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -1593,14 +1672,53 @@ async def on_staff_decision(update: Update, context: ContextTypes.DEFAULT_TYPE):
             },
         ).execute()
 
-        # 4. следующий шаг — курьер
+        # 4. создаем курьера СРАЗУ (без ETA), чтобы далее только обновлять
+        try:
+            # перечитываем строку заказа, чтобы собрать payload нормальным способом
+            # target_row у нас уже есть, но build_courier_payload ожидает order_row list
+            payload = build_courier_payload(target_row)
+            payload["pickup_eta_at"] = ""  # пока пусто, стаф выберет позже
+            payload["comment"] = (target_row[7] if len(target_row) > 7 else "") + "\nETA: pending"
+            res = await courier_create_order(payload)
+
+            if not res.get("ok"):
+                raise RuntimeError("courier create not ok")
+
+            external_id = res.get("external_id", "") or ""
+
+            # сохраняем external_id сразу в orders!W
+            sheet.values().update(
+                spreadsheetId=SPREADSHEET_ID,
+                range=f"orders!W{target_index}",
+                valueInputOption="RAW",
+                body={"values": [[external_id]]},
+            ).execute()
+
+            # отметим состояние, что курьер создан, ждем ETA
+            sheet.values().update(
+                spreadsheetId=SPREADSHEET_ID,
+                range=f"orders!T{target_index}",
+                valueInputOption="RAW",
+                body={"values": [["courier_pending_eta"]]},
+            ).execute()
+
+        except Exception as e:
+            log.exception(f"❌ courier precreate failed for order {order_id}: {e}")
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="❌ Не удалось создать курьера. Попробуйте еще раз или выберите 'Не вызывать курьера'.",
+            )
+            # все равно показываем кнопки ETA, чтобы можно было продолжить
+            # но курьерка будет падать на update, если external_id пустой
+
+        # 5. следующий шаг — стаф выбирает ETA
         await context.bot.send_message(
             chat_id=chat_id,
             text="Через сколько должен приехать курьер?",
             reply_markup=kb_staff_pickup_eta(order_id),
         )
 
-        # 5. чистим старое сообщение
+        # 6. чистим старое сообщение
         try:
             await q.message.delete()
         except Exception:
@@ -1826,7 +1944,46 @@ async def on_staff_eta(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ),
     )
 
-    ok = await send_to_courier_and_persist(rows[target_idx - 1], target_idx)
+    # берём external_id из orders!W (колонка W = индекс 22, 0-based)
+    order_row = rows[target_idx - 1]
+    external_id = order_row[22] if len(order_row) > 22 else ""
+
+    # обновляем курьерку: ETA и comment
+    try:
+        patch = {
+            "pickup_eta_at": pickup_eta_at,
+            "comment": (order_row[7] if len(order_row) > 7 else "") + f"\nETA: {minutes}min",
+        }
+        res = await courier_update_order(external_id, patch)
+        if not res.get("ok"):
+            raise RuntimeError(res.get("error") or "courier update not ok")
+
+        # фиксируем результат update в orders!X/Y/Z
+        sheet.values().batchUpdate(
+            spreadsheetId=SPREADSHEET_ID,
+            body={
+                "valueInputOption": "RAW",
+                "data": [
+                    {"range": f"orders!X{target_idx}", "values": [["ok"]]},
+                    {"range": f"orders!Y{target_idx}", "values": [[""]]},
+                    {"range": f"orders!Z{target_idx}", "values": [[datetime.utcnow().isoformat()]]},
+                    {"range": f"orders!T{target_idx}", "values": [["courier_requested"]]},
+                ],
+            },
+        ).execute()
+
+    except Exception as e:
+        log.exception(f"❌ courier update failed for order {order_id}: {e}")
+        sheet.values().batchUpdate(
+            spreadsheetId=SPREADSHEET_ID,
+            body={
+                "valueInputOption": "RAW",
+                "data": [
+                    {"range": f"orders!X{target_idx}", "values": [["failed"]]},
+                    {"range": f"orders!Y{target_idx}", "values": [[str(e)[:500]]]},
+                ],
+            },
+        ).execute()
 
     try:
         await q.message.delete()
@@ -1885,6 +2042,15 @@ async def on_staff_no_courier(update: Update, context: ContextTypes.DEFAULT_TYPE
             break
     if not target_idx:
         return
+
+    order_row = rows[target_idx - 1]
+    external_id = order_row[22] if len(order_row) > 22 else ""
+
+    try:
+        await courier_cancel_order(external_id)
+    except Exception as e:
+        log.warning(f"⚠️ courier cancel failed for order {order_id}: {e}")
+
 
     sheet.values().batchUpdate(
         spreadsheetId=SPREADSHEET_ID,
@@ -1991,17 +2157,42 @@ COURIER_API_BASE = os.getenv("COURIER_API_BASE", "")
 COURIER_API_KEY  = os.getenv("COURIER_API_KEY", "")
 COURIER_TIMEOUT  = 10
 
-async def courier_create_order(payload: dict) -> dict:
+async def courier_update_order(external_id: str, patch: dict) -> dict:
     """
-    Реальный вызов курьерки.
-    Должен быть идемпотентным по order_id.
+    Обновление заказа в курьерке (ETA, comment).
+    dev-safe: всегда ok.
     """
+    if not external_id:
+        return {"ok": False, "error": "external_id is empty"}
+
     if not COURIER_API_BASE:
-        # dev-safe: имитируем успех
-        return {
-            "ok": True,
-            "external_id": f"DEV-{payload.get('order_id')}",
-        }
+        return {"ok": True}
+
+    headers = {
+        "Authorization": f"Bearer {COURIER_API_KEY}",
+        "Content-Type": "application/json",
+    }
+
+    async with httpx.AsyncClient(timeout=COURIER_TIMEOUT) as client:
+        r = await client.patch(
+            f"{COURIER_API_BASE}/orders/{external_id}",
+            headers=headers,
+            json=patch,
+        )
+        r.raise_for_status()
+        return {"ok": True}
+
+
+async def courier_cancel_order(external_id: str) -> dict:
+    """
+    Отмена заказа в курьерке.
+    dev-safe: ok.
+    """
+    if not external_id:
+        return {"ok": True}
+
+    if not COURIER_API_BASE:
+        return {"ok": True}
 
     headers = {
         "Authorization": f"Bearer {COURIER_API_KEY}",
@@ -2010,16 +2201,12 @@ async def courier_create_order(payload: dict) -> dict:
 
     async with httpx.AsyncClient(timeout=COURIER_TIMEOUT) as client:
         r = await client.post(
-            f"{COURIER_API_BASE}/orders",
+            f"{COURIER_API_BASE}/orders/{external_id}/cancel",
             headers=headers,
-            json=payload,
+            json={},
         )
         r.raise_for_status()
-        data = r.json()
-        return {
-            "ok": True,
-            "external_id": data.get("id"),
-        }
+        return {"ok": True}
 
 
 async def send_to_courier_and_persist(order_row: list, target_idx: int):
@@ -2576,6 +2763,16 @@ def get_kitchen_address_cached(ttl=300):
 
     return None
 
+def get_kitchen_city_cached():
+    try:
+        rows = get_sheet_values("kitchen")
+        # ожидаем строку: ["kitchen", "서울특별시", "dunpo"]
+        if rows and len(rows[0]) >= 3:
+            return rows[0][2].strip()
+    except Exception:
+        pass
+    return None
+
 # -------------------------
 # main/helpers
 # -------------------------
@@ -2885,7 +3082,7 @@ async def notify_staff(bot, order_id: str):
     address         = order_row[13] if len(order_row) > 13 else ""
     delivery_fee    = int(order_row[14]) if len(order_row) > 14 and str(order_row[14]).isdigit() else 0
         
-    if status != "pending":
+    if status not in ("pending", "created"):
         return None
 
     buyer_name = ""
