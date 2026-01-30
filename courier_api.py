@@ -12,6 +12,7 @@ COURIER_API_TIMEOUT = 10
 
 
 async def courier_create_order(payload: dict) -> dict:
+    log.error("### REAL courier_create_order CALLED ###")
     """
     Создает заказ курьеру.
     Никогда не кидает исключения наружу.

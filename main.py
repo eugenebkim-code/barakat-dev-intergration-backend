@@ -26,6 +26,7 @@ from datetime import datetime, timedelta
 import json
 from google.oauth2.service_account import Credentials
 
+
 # -------------------------
 # Web API client (safe import)
 # -------------------------
@@ -79,10 +80,12 @@ from googleapiclient.discovery import build
 from broadcast import register_broadcast_handlers
 from dotenv import load_dotenv
 load_dotenv()
-
+from courier_payload import build_courier_payload
 from telegram.ext import CallbackQueryHandler
 from staff_callbacks import staff_callback
 from keyboards_staff import kb_staff_pickup_eta
+from courier_api import courier_create_order
+
 from config import (
     BOT_TOKEN,
     OWNER_CHAT_ID_INT,
@@ -91,10 +94,10 @@ from config import (
     SPREADSHEET_ID,
 )
 HOME_PHOTO_FILE_ID = "AgACAgUAAxkBAAIBWml2tkzPZ3lgBPKTVeeA3Wi9Z3yJAAKuDWsbhLi4VyKeP_hEUISAAQADAgADeQADOAQ"
-
+import inspect
 import requests
 
-WEB_API_URL = os.getenv("WEB_API_URL", "http://localhost:8000")
+WEB_API_URL = os.getenv("WEB_API_URL", "http://127.0.0.1:8000")
 WEB_API_KEY = os.getenv("WEB_API_KEY", "DEV_KEY")
 WEB_API_TIMEOUT = 5
 
@@ -1558,8 +1561,6 @@ async def on_staff_decision(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         _, action, order_id = data.split(":", 2)
         log.info(f"🧾 STAFF ACTION: {action} on order {order_id}")
-
-
     except ValueError:
         log.warning(f"⚠️ invalid callback data: {data}")
         return
@@ -1570,7 +1571,7 @@ async def on_staff_decision(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # --- читаем заказы ---
     result = sheet.values().get(
         spreadsheetId=SPREADSHEET_ID,
-        range="orders!A:O",  # ⬅️ до reaction_seconds
+        range="orders!A:O",
     ).execute()
 
     rows = result.get("values", [])
@@ -1609,13 +1610,12 @@ async def on_staff_decision(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # --- действие ---
     if action == "approve":
-        # 1. статус
         new_status = "approved"
 
-        # 2. комиссия (считаем сразу)
+        # комиссия
         try:
             platform_commission = 0
-            cart = parse_items_from_order(target_row[4])  # или из context, если есть
+            cart = parse_items_from_order(target_row[4])
 
             for pid, qty in cart.items():
                 p = get_product_by_id(pid)
@@ -1633,78 +1633,47 @@ async def on_staff_decision(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             handled_at = datetime.utcnow()
             reaction_seconds = ""
-        # 3. апдейт заказа (ОДИН РАЗ)
+
+        # --- основной апдейт заказа ---
         sheet.values().batchUpdate(
             spreadsheetId=SPREADSHEET_ID,
             body={
                 "valueInputOption": "RAW",
                 "data": [
-                    {"range": f"orders!J{target_index}", "values": [["approved"]]},
+                    {"range": f"orders!J{target_index}", "values": [[new_status]]},
                     {"range": f"orders!K{target_index}", "values": [[handled_at.isoformat()]]},
                     {"range": f"orders!L{target_index}", "values": [[str(chat_id)]]},
                     {"range": f"orders!M{target_index}", "values": [[reaction_seconds]]},
 
-                    # комиссия
                     {"range": f"orders!AA{target_index}", "values": [[commission_created_at]]},
                     {"range": f"orders!AB{target_index}", "values": [[platform_commission]]},
                     {"range": f"orders!AC{target_index}", "values": [["unpaid"]]},
+
+                    # курьер тут НЕ вызываем, только переводим в ожидание ETA (staff_eta)
+                    {"range": f"orders!T{target_index}", "values": [["courier_pending_eta"]]},
                 ],
             },
         ).execute()
 
-        # 4. создаем курьера СРАЗУ (без ETA), чтобы далее только обновлять
-        try:
-            # перечитываем строку заказа, чтобы собрать payload нормальным способом
-            # target_row у нас уже есть, но build_courier_payload ожидает order_row list
-            payload = build_courier_payload(target_row)
-            payload["pickup_eta_at"] = ""  # пока пусто, стаф выберет позже
-            payload["comment"] = (target_row[7] if len(target_row) > 7 else "") + "\nETA: pending"
-            res = await courier_create_order(payload)
+        log.info(
+            f"➡️ order {order_id}: approved, moved to courier_pending_eta (waiting staff ETA)"
+        )
 
-            if not res.get("ok"):
-                raise RuntimeError("courier create not ok")
-
-            external_id = res.get("external_id", "") or ""
-
-            # сохраняем external_id сразу в orders!W
-            sheet.values().update(
-                spreadsheetId=SPREADSHEET_ID,
-                range=f"orders!W{target_index}",
-                valueInputOption="RAW",
-                body={"values": [[external_id]]},
-            ).execute()
-
-            # отметим состояние, что курьер создан, ждем ETA
-            sheet.values().update(
-                spreadsheetId=SPREADSHEET_ID,
-                range=f"orders!T{target_index}",
-                valueInputOption="RAW",
-                body={"values": [["courier_pending_eta"]]},
-            ).execute()
-
-        except Exception as e:
-            log.exception(f"❌ courier precreate failed for order {order_id}: {e}")
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text="❌ Не удалось создать курьера. Попробуйте еще раз или выберите 'Не вызывать курьера'.",
-            )
-            # все равно показываем кнопки ETA, чтобы можно было продолжить
-            # но курьерка будет падать на update, если external_id пустой
-
-        # 5. следующий шаг — стаф выбирает ETA
+        # --- следующий шаг: выбор ETA ---
         await context.bot.send_message(
             chat_id=chat_id,
             text="Через сколько должен приехать курьер?",
             reply_markup=kb_staff_pickup_eta(order_id),
         )
 
-        # 6. чистим старое сообщение
         try:
             await q.message.delete()
         except Exception:
             pass
 
         return
+
+    # дальше твой код без изменений (reject ветка и тд)
 
     # --- метрика времени реакции ---
     try:
@@ -1837,6 +1806,7 @@ DELIVERY_FEE = 4000
 # -------------------------
 
 async def on_staff_eta(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    log.error("### ENTER on_staff_eta ###")
     q = update.callback_query
     await q.answer()
 
@@ -1852,14 +1822,15 @@ async def on_staff_eta(update: Update, context: ContextTypes.DEFAULT_TYPE):
     service = get_sheets_service()
     sheet = service.spreadsheets()
 
-    # --- 5.1 защита от повторного решения ---
+    # --- защита от повторного решения ---
     rows = sheet.values().get(
         spreadsheetId=SPREADSHEET_ID,
-        range="orders!A:T",
+        range="orders!A:Z",
     ).execute().get("values", [])
 
     target_idx = None
     current_status = ""
+
     for i, r in enumerate(rows[1:], start=2):
         if r and r[0] == order_id:
             target_idx = i
@@ -1876,23 +1847,8 @@ async def on_staff_eta(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
         return
-    
-    # --- конец защиты ---
 
-    # найти строку заказа
-    rows = sheet.values().get(
-        spreadsheetId=SPREADSHEET_ID,
-        range="orders!A:T",
-    ).execute().get("values", [])
-
-    target_idx = None
-    for i, r in enumerate(rows[1:], start=2):
-        if r and r[0] == order_id:
-            target_idx = i
-            break
-    if not target_idx:
-        return
-
+    # --- обновляем ETA и статус в Sheets ---
     sheet.values().batchUpdate(
         spreadsheetId=SPREADSHEET_ID,
         body={
@@ -1905,17 +1861,26 @@ async def on_staff_eta(update: Update, context: ContextTypes.DEFAULT_TYPE):
         },
     ).execute()
 
-    payload = build_courier_payload(rows[target_idx - 1])
-    sheet.values().update(
+    # --- повторно перечитываем строку (после записи ETA) ---
+    rows = sheet.values().get(
         spreadsheetId=SPREADSHEET_ID,
-        range=f"orders!V{target_idx}",
-        valueInputOption="RAW",
-        body={"values": [[json.dumps(payload, ensure_ascii=False)]]},
-    ).execute()
+        range="orders!A:Z",
+    ).execute().get("values", [])
 
+    order_row = rows[target_idx - 1]
 
-    # уведомляем клиента
-    buyer_chat_id = int(rows[target_idx-1][2])
+    # --- отправляем заказ в курьерку (ОДИН раз, с явным ETA) ---
+    success = await send_to_courier_and_persist(
+        order_row=order_row,
+        target_idx=target_idx,
+        pickup_eta_at=pickup_eta_at,
+    )
+
+    if not success:
+        log.error(f"❌ failed to send order {order_id} to courier")
+
+    # --- уведомляем клиента ---
+    buyer_chat_id = int(order_row[2])
     await context.bot.send_message(
         chat_id=buyer_chat_id,
         text=(
@@ -1923,47 +1888,6 @@ async def on_staff_eta(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Вы можете отслеживать доставку в боте курьерской службы."
         ),
     )
-
-    # берём external_id из orders!W (колонка W = индекс 22, 0-based)
-    order_row = rows[target_idx - 1]
-    external_id = order_row[22] if len(order_row) > 22 else ""
-
-    # обновляем курьерку: ETA и comment
-    try:
-        patch = {
-            "pickup_eta_at": pickup_eta_at,
-            "comment": (order_row[7] if len(order_row) > 7 else "") + f"\nETA: {minutes}min",
-        }
-        res = await courier_update_order(external_id, patch)
-        if not res.get("ok"):
-            raise RuntimeError(res.get("error") or "courier update not ok")
-
-        # фиксируем результат update в orders!X/Y/Z
-        sheet.values().batchUpdate(
-            spreadsheetId=SPREADSHEET_ID,
-            body={
-                "valueInputOption": "RAW",
-                "data": [
-                    {"range": f"orders!X{target_idx}", "values": [["ok"]]},
-                    {"range": f"orders!Y{target_idx}", "values": [[""]]},
-                    {"range": f"orders!Z{target_idx}", "values": [[datetime.utcnow().isoformat()]]},
-                    {"range": f"orders!T{target_idx}", "values": [["courier_requested"]]},
-                ],
-            },
-        ).execute()
-
-    except Exception as e:
-        log.exception(f"❌ courier update failed for order {order_id}: {e}")
-        sheet.values().batchUpdate(
-            spreadsheetId=SPREADSHEET_ID,
-            body={
-                "valueInputOption": "RAW",
-                "data": [
-                    {"range": f"orders!X{target_idx}", "values": [["failed"]]},
-                    {"range": f"orders!Y{target_idx}", "values": [[str(e)[:500]]]},
-                ],
-            },
-        ).execute()
 
     try:
         await q.message.delete()
@@ -1985,7 +1909,7 @@ async def on_staff_no_courier(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     rows = sheet.values().get(
         spreadsheetId=SPREADSHEET_ID,
-        range="orders!A:T",
+        range="orders!A:Z",
     ).execute().get("values", [])
 
     # защита от повторных действий
@@ -1993,7 +1917,7 @@ async def on_staff_no_courier(update: Update, context: ContextTypes.DEFAULT_TYPE
     sheet = service.spreadsheets()
     rows = sheet.values().get(
         spreadsheetId=SPREADSHEET_ID,
-        range="orders!A:T",
+        range="orders!A:Z",
     ).execute().get("values", [])
 
     target_idx = None
@@ -2023,8 +1947,14 @@ async def on_staff_no_courier(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not target_idx:
         return
 
+    COL_COURIER_EXTERNAL_ID_IDX = ord("W") - ord("A")  # = 22
+
     order_row = rows[target_idx - 1]
-    external_id = order_row[22] if len(order_row) > 22 else ""
+    external_id = (
+        order_row[COL_COURIER_EXTERNAL_ID_IDX]
+        if len(order_row) > COL_COURIER_EXTERNAL_ID_IDX
+        else ""
+    )
 
     try:
         await courier_cancel_order(external_id)
@@ -2074,7 +2004,7 @@ async def on_staff_eta_manual_click(update: Update, context: ContextTypes.DEFAUL
     sheet = service.spreadsheets()
     rows = sheet.values().get(
         spreadsheetId=SPREADSHEET_ID,
-        range="orders!A:T",
+        range="orders!A:Z",
     ).execute().get("values", [])
 
     target_idx = None
@@ -2176,42 +2106,77 @@ async def courier_cancel_order(external_id: str) -> dict:
         return {"ok": True}
 
 
-async def send_to_courier_and_persist(order_row: list, target_idx: int):
+from datetime import datetime, timezone
+
+async def send_to_courier_and_persist(
+    order_row: list,
+    target_idx: int,
+    *,
+    pickup_eta_at: str | None = None,
+):
+    log.error("### ENTER send_to_courier_and_persist ###")
+
     service = get_sheets_service()
     sheet = service.spreadsheets()
 
-    raw_payload = order_row[21] if len(order_row) > 21 else None
+    # 1) формируем payload
+    payload = build_courier_payload(
+        order_row,
+        pickup_eta_at=pickup_eta_at,
+    )
 
-    if raw_payload:
-        try:
-            payload = json.loads(raw_payload)
-        except Exception as e:
-            log.error(f"❌ invalid courier payload JSON in row {target_idx}: {e}")
-            payload = build_courier_payload(order_row)
-    else:
-        payload = build_courier_payload(order_row)
+    log.error(
+        "[send_to_courier_and_persist] payload built | "
+        f"order_id={payload.get('order_id')} "
+        f"pickup_eta_at={payload.get('pickup_eta_at')!r}"
+    )
+
+    # 2) финальная защита перед HTTP
+    if not payload.get("pickup_eta_at"):
+        payload["pickup_eta_at"] = datetime.now(timezone.utc).isoformat()
+        log.error(
+            "[send_to_courier_and_persist] pickup_eta_at was empty -> forced now | "
+            f"{payload['pickup_eta_at']}"
+        )
 
     try:
+        # 3) вызов курьерки
+        log.error("[send_to_courier_and_persist] BEFORE courier_create_order")
         res = await courier_create_order(payload)
-        if not res.get("ok"):
-            raise RuntimeError("courier response not ok")
+        log.error(f"[send_to_courier_and_persist] AFTER courier_create_order res={res!r}")
 
+        # ⬇️ КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ
+        if res.get("status") != "ok":
+            raise RuntimeError(f"courier response not ok: {res!r}")
+
+        external_id = res.get("delivery_order_id", "") or ""
+
+        # 4) фиксируем успешную отправку
         sheet.values().batchUpdate(
             spreadsheetId=SPREADSHEET_ID,
             body={
                 "valueInputOption": "RAW",
                 "data": [
-                    {"range": f"orders!W{target_idx}", "values": [[res.get("external_id", "")]]},
+                    {"range": f"orders!W{target_idx}", "values": [[external_id]]},
                     {"range": f"orders!T{target_idx}", "values": [["courier_requested"]]},
                     {"range": f"orders!X{target_idx}", "values": [["ok"]]},
                     {"range": f"orders!Y{target_idx}", "values": [[""]]},
-                    {"range": f"orders!Z{target_idx}", "values": [[datetime.utcnow().isoformat()]]},
+                    {"range": f"orders!Z{target_idx}", "values": [[datetime.now(timezone.utc).isoformat()]]},
                 ],
             },
         ).execute()
+
+        log.error(
+            "[send_to_courier_and_persist] SUCCESS | "
+            f"order_idx={target_idx} external_id={external_id!r}"
+        )
         return True
 
     except Exception as e:
+        log.exception(
+            "[send_to_courier_and_persist] EXCEPTION while sending to courier"
+        )
+
         sheet.values().batchUpdate(
             spreadsheetId=SPREADSHEET_ID,
             body={
@@ -2222,6 +2187,7 @@ async def send_to_courier_and_persist(order_row: list, target_idx: int):
                 ],
             },
         ).execute()
+
         return False
 
 
