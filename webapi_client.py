@@ -1,3 +1,5 @@
+# webapi_client.py
+
 import httpx
 import os
 import logging
@@ -15,6 +17,13 @@ async def webapi_create_order(payload: dict) -> dict:
     Никогда не бросает исключения наружу.
     """
 
+    log.info(
+        "[CREATE_ORDER] from=%s order_id=%s client=%s",
+        payload.get("source"),
+        payload.get("order_id"),
+        payload.get("client_tg_id"),
+    )
+
     # DEV / fallback режим
     if not WEB_API_URL:
         log.warning("WEB_API_URL not set, using stub create_order")
@@ -31,22 +40,25 @@ async def webapi_create_order(payload: dict) -> dict:
                 json=payload,
                 headers={
                     "X-API-KEY": API_KEY,
+                    "X-ROLE": "kitchen",
                 },
             )
 
         if resp.status_code != 200:
             log.error(
-                f"WEBAPI create_order failed "
-                f"status={resp.status_code} body={resp.text}"
+                "WEBAPI create_order failed | status=%s body=%s",
+                resp.status_code,
+                resp.text,
             )
             return {"status": "error", "reason": "http_error"}
 
         return resp.json()
 
     except Exception as e:
-        log.exception(f"WEBAPI create_order exception: {e}")
+        log.exception("WEBAPI create_order exception")
         return {"status": "error", "reason": "exception"}
-    
+
+
 async def webapi_check_address(payload: dict) -> dict:
     """
     Проверка адреса через Web API.
@@ -70,18 +82,20 @@ async def webapi_check_address(payload: dict) -> dict:
                 json=payload,
                 headers={
                     "X-API-KEY": API_KEY,
+                    "X-ROLE": "kitchen",
                 },
             )
 
         if resp.status_code != 200:
             log.error(
-                f"WEBAPI check_address failed "
-                f"status={resp.status_code} body={resp.text}"
+                "WEBAPI check_address failed | status=%s body=%s",
+                resp.status_code,
+                resp.text,
             )
             return {"ok": False, "message": "http_error"}
 
         return resp.json()
 
     except Exception as e:
-        log.exception(f"WEBAPI check_address exception: {e}")
+        log.exception("WEBAPI check_address exception")
         return {"ok": False, "message": "exception"}

@@ -1247,14 +1247,21 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not city_code:
             city_code = "CITY_NOT_SET"
 
+        # 🔒 Гарантия pickup_eta_at для доставки
+        if checkout.get("type") == "delivery":
+            if not checkout.get("pickup_eta_at"):
+                checkout["pickup_eta_at"] = datetime.utcnow().isoformat()
+
         order_payload = {
             "order_id": order_id,
             "source": "kitchen",
+            "kitchen_id": 1,  # ⬅️ ОБЯЗАТЕЛЬНО
             "client_tg_id": user.id,
             "client_name": checkout.get("real_name"),
             "client_phone": checkout.get("phone_number"),
             "pickup_address": pickup_address,
             "delivery_address": checkout.get("address", ""),
+            "pickup_eta_at": checkout.get("pickup_eta_at"),  # если есть
             "city": city_code,
             "comment": comment,
         }
@@ -1270,6 +1277,29 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "status": "ok",
                     "external_delivery_ref": None,  # НОРМА для самовывоза
                 }
+       
+        # 🔍 DEBUG: payload перед отправкой в Web API
+        log.info(
+            "[WEBAPI_CREATE_ORDER_CALL] order_id=%s type=%s pickup_eta_at=%s courier_requested=%s payload=%s",
+            order_payload.get("order_id"),
+            checkout.get("type"),
+            order_payload.get("pickup_eta_at"),
+            bool(order_payload.get("pickup_eta_at")),
+            order_payload,
+        )
+
+        # 🔒 гарантия pickup_eta_at для доставки (чтобы Web API создал доставку)
+        if checkout.get("type") == "delivery" and not order_payload.get("pickup_eta_at"):
+            order_payload["pickup_eta_at"] = datetime.utcnow().isoformat()
+
+        # 🔍 DEBUG: payload перед отправкой в Web API
+        log.info(
+            "[WEBAPI_CREATE_ORDER_CALL] order_id=%s type=%s pickup_eta_at=%s url=%s",
+            order_payload.get("order_id"),
+            checkout.get("type"),
+            order_payload.get("pickup_eta_at"),
+            os.getenv("WEB_API_URL", ""),
+        )
 
         try:
             resp = await webapi_create_order(order_payload)
@@ -2136,6 +2166,26 @@ async def send_to_courier_and_persist(
         f"order_id={payload.get('order_id')} "
         f"pickup_eta_at={payload.get('pickup_eta_at')!r}"
     )
+
+    # === NEW: регистрируем заказ в Web API ===
+    try:
+        await create_webapi_order({
+            "order_id": payload["order_id"],
+            "source": "kitchen",
+            "kitchen_id": 1,  # или вычисляй, если есть
+            "client_tg_id": payload["client_tg_id"],
+            "client_name": payload["client_name"],
+            "client_phone": payload["client_phone"],
+            "pickup_address": payload["pickup_address"],
+            "delivery_address": payload["delivery_address"],
+            "pickup_eta_at": payload["pickup_eta_at"],
+            "city": payload["city"],
+            "comment": payload.get("comment"),
+        })
+    except Exception as e:
+        log.exception("[send_to_courier_and_persist] WebAPI create_order failed")
+        # ❗️ВАЖНО: не ломаем флоу кухни
+
 
     # 2) финальная защита перед HTTP
     if not payload.get("pickup_eta_at"):
