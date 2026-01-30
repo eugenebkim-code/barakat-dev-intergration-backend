@@ -7,7 +7,7 @@ import httpx
 log = logging.getLogger("COURIER_API")
 
 COURIER_API_URL = os.getenv("COURIER_API_URL", "")
-COURIER_API_KEY = os.getenv("COURIER_API_KEY", "")
+API_KEY = os.getenv("API_KEY", "")
 COURIER_API_TIMEOUT = 10
 
 
@@ -32,7 +32,7 @@ async def courier_create_order(payload: dict) -> dict:
                 f"{COURIER_API_URL}/api/v1/orders",
                 json=payload,
                 headers={
-                    "X-API-KEY": COURIER_API_KEY,
+                    "X-API-KEY": API_KEY,
                 },
             )
 

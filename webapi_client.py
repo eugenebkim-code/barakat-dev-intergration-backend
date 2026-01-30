@@ -5,7 +5,7 @@ import logging
 log = logging.getLogger(__name__)
 
 WEB_API_URL = os.getenv("WEB_API_URL", "")
-WEB_API_KEY = os.getenv("WEB_API_KEY", "")
+API_KEY = os.getenv("WEB_API_KEY", "")
 WEB_API_TIMEOUT = 5
 
 
@@ -30,7 +30,7 @@ async def webapi_create_order(payload: dict) -> dict:
                 f"{WEB_API_URL}/api/v1/orders",
                 json=payload,
                 headers={
-                    "X-API-KEY": WEB_API_KEY,
+                    "X-API-KEY": API_KEY,
                 },
             )
 
@@ -69,7 +69,7 @@ async def webapi_check_address(payload: dict) -> dict:
                 f"{WEB_API_URL}/api/v1/address/check",
                 json=payload,
                 headers={
-                    "X-API-KEY": WEB_API_KEY,
+                    "X-API-KEY": API_KEY,
                 },
             )
 

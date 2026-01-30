@@ -20,6 +20,7 @@
 
 import os
 import logging
+logger = logging.getLogger("FlowerShopKR")
 from typing import Dict, List, Optional
 from contextlib import ExitStack
 from datetime import datetime, timedelta
@@ -98,11 +99,14 @@ import inspect
 import requests
 
 WEB_API_URL = os.getenv("WEB_API_URL", "http://127.0.0.1:8000")
-WEB_API_KEY = os.getenv("WEB_API_KEY", "DEV_KEY")
+API_KEY = os.getenv("API_KEY", "DEV_KEY")
 WEB_API_TIMEOUT = 5
 
 def webapi_check_address(city: str, address: str) -> dict | None:
     try:
+        API_KEY = os.getenv("API_KEY") or "DEV_KEY"
+        logger.error(f"[COURIER_API] using X-API-KEY={API_KEY!r}")
+
         resp = requests.post(
             f"{WEB_API_URL}/api/v1/address/check",
             json={
@@ -110,19 +114,21 @@ def webapi_check_address(city: str, address: str) -> dict | None:
                 "address": address,
             },
             headers={
-                "X-API-KEY": WEB_API_KEY,
+                "X-API-KEY": API_KEY,
             },
             timeout=WEB_API_TIMEOUT,
         )
 
         if resp.status_code != 200:
-            log.error(f"WEBAPI address check failed: {resp.status_code} {resp.text}")
+            logger.error(
+                f"WEBAPI address check failed: {resp.status_code} {resp.text}"
+            )
             return None
 
         return resp.json()
 
     except Exception as e:
-        log.exception(f"WEBAPI address check exception: {e}")
+        logger.exception(f"WEBAPI address check exception: {e}")
         return None
     
 # -------------------------
@@ -2051,7 +2057,7 @@ import httpx
 import time
 
 COURIER_API_BASE = os.getenv("COURIER_API_BASE", "")
-COURIER_API_KEY  = os.getenv("COURIER_API_KEY", "")
+API_KEY = os.getenv("API_KEY", "DEV_KEY")
 COURIER_TIMEOUT  = 10
 
 async def courier_update_order(external_id: str, patch: dict) -> dict:
@@ -2066,7 +2072,7 @@ async def courier_update_order(external_id: str, patch: dict) -> dict:
         return {"ok": True}
 
     headers = {
-        "Authorization": f"Bearer {COURIER_API_KEY}",
+        "Authorization": f"Bearer {API_KEY}",
         "Content-Type": "application/json",
     }
 
@@ -2092,7 +2098,7 @@ async def courier_cancel_order(external_id: str) -> dict:
         return {"ok": True}
 
     headers = {
-        "Authorization": f"Bearer {COURIER_API_KEY}",
+        "Authorization": f"Bearer {API_KEY}",
         "Content-Type": "application/json",
     }
 
