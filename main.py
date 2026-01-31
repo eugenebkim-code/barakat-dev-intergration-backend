@@ -407,7 +407,7 @@ def save_order_to_sheets(
     order_id = order_id or str(uuid.uuid4())
     created_at = datetime.utcnow().isoformat()
 
-    row = [[
+    row_values = [
         order_id,                     # A order_id
         created_at,                   # B created_at
         str(user.id),                 # C user_id
@@ -425,8 +425,8 @@ def save_order_to_sheets(
         delivery_fee,                 # O delivery_fee
         "kitchen",                    # P source
         "",                           # Q staff_message_id
-        "",                           # R empty
-        "",                           # S empty
+        "",                           # R pickup_eta_at
+        "",                           # S eta_source
         "delivery_new" if kind == "Доставка" else "pickup",  # T delivery_state
         "",                           # U courier_status_raw
         external_delivery_ref or "",  # V courier_external_id
@@ -438,7 +438,7 @@ def save_order_to_sheets(
         "",                           # AB platform_commission
         "created",                    # AC commission_status
         "",                           # AD owner_debt_snapshot
-    ]]
+    ]
     log.info(
         "[save_order_to_sheets] order_id=%s kind=%s subtotal=%s delivery_fee=%s payment_proof=%s",
         order_id,
@@ -448,22 +448,43 @@ def save_order_to_sheets(
         bool(payment_photo_file_id),
     )
     try:
-        resp = sheet.values().append(
+        # Валидация ПЕРЕД записью
+        #validate_order_row(row_values)
+        
+        # Находим следующую пустую строку
+        existing = sheet.values().get(
             spreadsheetId=SPREADSHEET_ID,
             range=ORDERS_RANGE,
+        ).execute().get("values", [])
+        
+        next_row = len(existing) + 1
+        target_range = f"orders!A{next_row}:AD{next_row}"
+        
+        log.info(
+            f"[save_order_to_sheets] Existing rows: {len(existing)}, "
+            f"Writing to: {target_range}"
+        )
+        
+        # Используем update вместо append для гарантии правильной позиции
+        resp = sheet.values().update(
+            spreadsheetId=SPREADSHEET_ID,
+            range=target_range,
             valueInputOption="RAW",
-            insertDataOption="INSERT_ROWS",
-            body={"values": row},
+            body={"values": [row_values]},
         ).execute()
 
         log.info(
-            f"✅ ORDER APPENDED: order_id={order_id} "
-            f"resp={resp.get('updates', {}).get('updatedRange')}"
+            f"✅ ORDER WRITTEN: order_id={order_id} "
+            f"range={resp.get('updatedRange')}"
         )
         return order_id
 
+    except ValueError as e:
+        log.exception(f"❌ ORDER VALIDATION FAILED: {e}")
+        return None
+    
     except Exception:
-        log.exception(f"❌ ORDER APPEND FAILED: buyer={user.id}")
+        log.exception(f"❌ ORDER WRITE FAILED: buyer={user.id}")
         return None
     
 
