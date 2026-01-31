@@ -3,7 +3,14 @@
 import sys
 from pathlib import Path
 from datetime import datetime
-
+from config import (
+    BOT_TOKEN,
+    OWNER_CHAT_ID_INT,
+    ADMIN_CHAT_ID_INT,
+    STAFF_CHAT_IDS,
+    SPREADSHEET_ID,
+    ORDERS_RANGE,   # 👈 ВОТ ЭТО ДОБАВЛЯЕМ
+)
 
 WEB_API_PATH = Path(__file__).resolve().parents[1] / "raduga_demo_web_api"
 sys.path.append(str(WEB_API_PATH))
@@ -22,7 +29,7 @@ async def webapp_orders_job(context):
 
     rows = sheet.values().get(
         spreadsheetId=spreadsheet_id,
-        range="orders!A:Q",
+        range=ORDERS_RANGE,
     ).execute().get("values", [])
 
     if len(rows) < 2:

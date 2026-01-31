@@ -56,7 +56,7 @@ def find_order_row_by_id(order_id: str) -> Tuple[Optional[int], Optional[dict]]:
 
     rows = sheet.values().get(
         spreadsheetId=SPREADSHEET_ID,
-        range="orders!A:Q",
+        range=ORDERS_RANGE,
     ).execute().get("values", [])
 
     for idx, row in enumerate(rows[1:], start=2):

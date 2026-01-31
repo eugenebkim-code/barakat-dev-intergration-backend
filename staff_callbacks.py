@@ -5,7 +5,14 @@ from telegram import Update
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
 
-from config import STAFF_CHAT_IDS, SPREADSHEET_ID
+from config import (
+    BOT_TOKEN,
+    OWNER_CHAT_ID_INT,
+    ADMIN_CHAT_ID_INT,
+    STAFF_CHAT_IDS,
+    SPREADSHEET_ID,
+    ORDERS_RANGE,   # 👈 ВОТ ЭТО ДОБАВЛЯЕМ
+)
 from sheets_repo import get_sheets_service
 from staff_decision import handle_staff_decision
 from keyboards_staff import kb_staff_pickup_eta
@@ -105,7 +112,7 @@ async def staff_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         rows = sheet.values().get(
             spreadsheetId=SPREADSHEET_ID,
-            range="orders!A:Z",
+            range=ORDERS_RANGE,
         ).execute().get("values", [])
 
         target_idx = None

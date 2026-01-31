@@ -93,6 +93,7 @@ from config import (
     ADMIN_CHAT_ID_INT,
     STAFF_CHAT_IDS,
     SPREADSHEET_ID,
+    ORDERS_RANGE,   # 👈 ВОТ ЭТО ДОБАВЛЯЕМ
 )
 HOME_PHOTO_FILE_ID = "AgACAgUAAxkBAAIBWml2tkzPZ3lgBPKTVeeA3Wi9Z3yJAAKuDWsbhLi4VyKeP_hEUISAAQADAgADeQADOAQ"
 import inspect
@@ -367,6 +368,8 @@ def save_order_to_sheets(
     address: str | None = None,
     order_id: str | None = None,
     external_delivery_ref: str | None = None,
+    delivery_fee: int | None = None,
+    payment_photo_file_id: str | None = None,  # 👈 фото оплаты
 ) -> str | None:
     
     service = get_sheets_service()
@@ -383,10 +386,21 @@ def save_order_to_sheets(
         subtotal += p["customer_price"] * qty
 
     # доставка
-    delivery_fee = 0
-    if kind == "Доставка":
-        if subtotal < FREE_DELIVERY_FROM:
-            delivery_fee = DELIVERY_FEE
+    # если delivery_fee пришел извне (из checkout), используем его как источник истины
+    if delivery_fee is None:
+        delivery_fee = 0
+        if kind == "Доставка":
+            if subtotal < FREE_DELIVERY_FROM:
+                delivery_fee = DELIVERY_FEE
+
+    log.info(
+        "[save_order_to_sheets] order_id=%s kind=%s subtotal=%s delivery_fee=%s total=%s",
+        order_id,
+        kind,
+        subtotal,
+        delivery_fee,
+        subtotal + delivery_fee,
+    )
 
     total = subtotal + delivery_fee
 
@@ -394,34 +408,49 @@ def save_order_to_sheets(
     created_at = datetime.utcnow().isoformat()
 
     row = [[
-        order_id,
-        created_at,
-        str(user.id),
-        user.username or "",
-        "; ".join(items),
-        total,
-        kind,
-        comment or "",
-        "",
-        "created",
-        "",
-        "",
-        "",
-        address or "",
-        delivery_fee,
-        "stub",
-        "",                     # Q
-        "",                     # R
-        "",                     # S
-        "",                     # T
-        "",                     # U
-        external_delivery_ref,  # V  ← ВАЖНО
+        order_id,                     # A order_id
+        created_at,                   # B created_at
+        str(user.id),                 # C user_id
+        user.username or "",          # D username
+        "; ".join(items),             # E items
+        total,                        # F total_price
+        kind,                         # G type
+        comment or "",                # H comment
+        payment_photo_file_id or "",  # I payment_proof
+        "created",                    # J status
+        "",                           # K handled_at
+        "",                           # L handled_by
+        "",                           # M reaction_seconds
+        address or "",                # N address
+        delivery_fee,                 # O delivery_fee
+        "kitchen",                    # P source
+        "",                           # Q staff_message_id
+        "",                           # R empty
+        "",                           # S empty
+        "delivery_new" if kind == "Доставка" else "pickup",  # T delivery_state
+        "",                           # U courier_status_raw
+        external_delivery_ref or "",  # V courier_external_id
+        "",                           # W courier_external_id (legacy)
+        "",                           # X courier_status_detail
+        "",                           # Y courier_last_error
+        "",                           # Z courier_sent_at
+        "",                           # AA delivery_confirmed_at
+        "",                           # AB platform_commission
+        "created",                    # AC commission_status
+        "",                           # AD owner_debt_snapshot
     ]]
-
+    log.info(
+        "[save_order_to_sheets] order_id=%s kind=%s subtotal=%s delivery_fee=%s payment_proof=%s",
+        order_id,
+        kind,
+        subtotal,
+        delivery_fee,
+        bool(payment_photo_file_id),
+    )
     try:
         resp = sheet.values().append(
             spreadsheetId=SPREADSHEET_ID,
-            range="orders!A:O",
+            range=ORDERS_RANGE,
             valueInputOption="RAW",
             insertDataOption="INSERT_ROWS",
             body={"values": row},
@@ -888,7 +917,7 @@ async def dash_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     result = sheet.values().get(
         spreadsheetId=SPREADSHEET_ID,
-        range="orders!A:AC",
+        range=ORDERS_RANGE,
     ).execute()
 
     rows = result.get("values", [])
@@ -1386,10 +1415,13 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         saved = save_order_to_sheets(
             user=user,
             cart=cart,
-            kind=kind_label,  # "Самовывоз" или "Доставка"
+            kind=kind_label,
             comment=comment,
             address=checkout.get("address"),
             order_id=order_id,
+            external_delivery_ref=external_delivery_ref,
+            delivery_fee=checkout.get("delivery_price_krw"),
+            payment_photo_file_id=checkout.get("payment_photo_file_id"),  # 👈 ВАЖНО
         )
         await notify_staff(context.bot, order_id)
         save_user_contacts(
@@ -1651,7 +1683,7 @@ async def on_staff_decision(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # --- читаем заказы ---
     result = sheet.values().get(
         spreadsheetId=SPREADSHEET_ID,
-        range="orders!A:O",
+        range=ORDERS_RANGE,
     ).execute()
 
     rows = result.get("values", [])
@@ -1905,7 +1937,7 @@ async def on_staff_eta(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # --- защита от повторного решения ---
     rows = sheet.values().get(
         spreadsheetId=SPREADSHEET_ID,
-        range="orders!A:Z",
+        range=ORDERS_RANGE,
     ).execute().get("values", [])
 
     target_idx = None
@@ -1944,7 +1976,7 @@ async def on_staff_eta(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # --- повторно перечитываем строку (после записи ETA) ---
     rows = sheet.values().get(
         spreadsheetId=SPREADSHEET_ID,
-        range="orders!A:Z",
+        range=ORDERS_RANGE,
     ).execute().get("values", [])
 
     order_row = rows[target_idx - 1]
@@ -1990,7 +2022,7 @@ async def on_staff_no_courier(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     rows = sheet.values().get(
         spreadsheetId=SPREADSHEET_ID,
-        range="orders!A:Z",
+        range=ORDERS_RANGE,
     ).execute().get("values", [])
 
     # защита от повторных действий
@@ -1998,7 +2030,7 @@ async def on_staff_no_courier(update: Update, context: ContextTypes.DEFAULT_TYPE
     sheet = service.spreadsheets()
     rows = sheet.values().get(
         spreadsheetId=SPREADSHEET_ID,
-        range="orders!A:Z",
+        range=ORDERS_RANGE,
     ).execute().get("values", [])
 
     target_idx = None
@@ -2085,7 +2117,7 @@ async def on_staff_eta_manual_click(update: Update, context: ContextTypes.DEFAUL
     sheet = service.spreadsheets()
     rows = sheet.values().get(
         spreadsheetId=SPREADSHEET_ID,
-        range="orders!A:Z",
+        range=ORDERS_RANGE,
     ).execute().get("values", [])
 
     target_idx = None
@@ -2345,7 +2377,7 @@ async def on_staff_courier_retry(update: Update, context: ContextTypes.DEFAULT_T
     sheet = service.spreadsheets()
     rows = sheet.values().get(
         spreadsheetId=SPREADSHEET_ID,
-        range="orders!A:Z",
+        range=ORDERS_RANGE,
     ).execute().get("values", [])
 
     target_idx = None
@@ -2378,7 +2410,7 @@ async def on_owner_commission_paid(update: Update, context: ContextTypes.DEFAULT
 
     rows = sheet.values().get(
         spreadsheetId=SPREADSHEET_ID,
-        range="orders!A:AC",
+        range=ORDERS_RANGE,
     ).execute().get("values", [])
 
     unpaid_rows = []
@@ -2469,7 +2501,7 @@ async def on_owner_commission_paid_confirm(update: Update, context: ContextTypes
 
     rows = sheet.values().get(
         spreadsheetId=SPREADSHEET_ID,
-        range="orders!A:AC",
+        range=ORDERS_RANGE,
     ).execute().get("values", [])
 
     orders_count = 0
@@ -2593,7 +2625,7 @@ async def on_staff_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         rows = sheet.values().get(
             spreadsheetId=SPREADSHEET_ID,
-            range="orders!A:T",
+            range=ORDERS_RANGE,
         ).execute().get("values", [])
 
         target_idx = None
@@ -3126,7 +3158,7 @@ async def notify_staff(bot, order_id: str):
     service = get_sheets_service()
     rows = service.spreadsheets().values().get(
         spreadsheetId=SPREADSHEET_ID,
-        range="orders!A:Q",
+        range=ORDERS_RANGE,
     ).execute().get("values", [])
 
     if len(rows) < 2:
