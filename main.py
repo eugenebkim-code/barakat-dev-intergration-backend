@@ -1069,8 +1069,33 @@ async def on_checkout_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         checkout["address"] = check.get("normalized_address", text)
+        checkout["delivery_price_krw"] = check.get("price_krw", 0)
+        checkout["distance_km"] = check.get("distance_km")
         context.user_data["address_verified"] = True
 
+        price_krw = check.get("price_krw", 0)
+        distance_km = check.get("distance_km", 0)
+        
+        # Если вне зоны — спрашиваем подтверждение
+        if distance_km and distance_km > 4.0:
+            checkout["step"] = "confirm_price"
+            
+            await msg.reply_text(
+                f"📍 Адрес подтверждён\n\n"
+                f"⚠️ Адрес вне стандартной зоны доставки\n"
+                f"📏 Расстояние: {distance_km} км\n"
+                f"🚚 Стоимость доставки: {price_krw:,}₩\n\n"
+                f"Продолжить оформление?",
+                reply_markup=InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton("✅ Согласен", callback_data="checkout:price_ok"),
+                        InlineKeyboardButton("❌ Отмена", callback_data="checkout:price_cancel"),
+                    ]
+                ])
+            )
+            return
+        
+        # В зоне — сразу к комментарию
         checkout["step"] = "comment"
 
         m = await context.bot.send_message(
@@ -1104,6 +1129,7 @@ async def on_checkout_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
         kind_label=kind_label,
         comment=text,
         address=checkout.get("address"),
+        delivery_price_krw=checkout.get("delivery_price_krw"),  # 👈 ДОБАВИТЬ
     )
 
     await clear_ui(context, chat_id)
@@ -1196,6 +1222,22 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await render_cart(context, chat_id)
         return
 
+    if data == "checkout:price_ok":
+        checkout = context.user_data.get("checkout", {})
+        checkout["step"] = "comment"
+        
+        await q.message.edit_text(
+            "✅ Цена подтверждена\n\n"
+            "✍️ Напишите комментарий к заказу.\n"
+            "• Например: удобное время доставки"
+        )
+        return
+
+    if data == "checkout:price_cancel":
+        context.user_data.pop("checkout", None)
+        await q.message.edit_text("❌ Заказ отменён")
+        return
+
     # ---------- CHECKOUT ----------
 
     if data == "checkout:final_send":
@@ -1264,6 +1306,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "pickup_eta_at": checkout.get("pickup_eta_at"),  # если есть
             "city": city_code,
             "comment": comment,
+            "price_krw": checkout.get("delivery_price_krw", 0),  # 👈 ДОБАВИТЬ
         }
 
         # --- Web API create order ---
@@ -1559,8 +1602,9 @@ async def on_buyer_payment_photo(update: Update, context: ContextTypes.DEFAULT_T
     preview_text = build_checkout_preview(
         cart=cart,
         kind_label=kind_label,
-        comment=comment,
+        comment=checkout.get("comment"),
         address=checkout.get("address"),
+        delivery_price_krw=checkout.get("delivery_price_krw"),
     )
 
     await clear_ui(context, chat_id)
@@ -1910,6 +1954,7 @@ async def on_staff_eta(update: Update, context: ContextTypes.DEFAULT_TYPE):
         order_row=order_row,
         target_idx=target_idx,
         pickup_eta_at=pickup_eta_at,
+        eta_minutes=minutes,
     )
 
     if not success:
@@ -2142,37 +2187,73 @@ async def courier_cancel_order(external_id: str) -> dict:
         return {"ok": True}
 
 
-from datetime import datetime, timezone
+# =========================
+# Web API client (kitchen -> webapi)
+# =========================
 
+import os
+import httpx
+import logging
+
+log = logging.getLogger("WEBAPI_CLIENT")
+
+WEB_API_URL = os.getenv("WEB_API_URL", "http://127.0.0.1:8000")
+WEB_API_KEY = os.getenv("WEB_API_KEY", os.getenv("API_KEY", "DEV_KEY"))
+
+
+async def create_webapi_order(payload: dict) -> dict:
+    """
+    Kitchen registers order in Web API (idempotent).
+    Does NOT break kitchen flow if Web API is down (caller handles exceptions).
+    """
+    url = f"{WEB_API_URL}/api/v1/orders"
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.post(
+            url,
+            json=payload,
+            headers={
+                "X-API-KEY": WEB_API_KEY,
+                "X-ROLE": "kitchen",
+            },
+        )
+
+    if resp.status_code != 200:
+        raise RuntimeError(f"WebAPI create_order failed {resp.status_code}: {resp.text[:500]}")
+
+    return resp.json()
+
+from datetime import datetime, timezone
 async def send_to_courier_and_persist(
     order_row: list,
     target_idx: int,
     *,
     pickup_eta_at: str | None = None,
+    eta_minutes: int | None = None,
 ):
-    log.error("### ENTER send_to_courier_and_persist ###")
-
     service = get_sheets_service()
     sheet = service.spreadsheets()
 
-    # 1) формируем payload
+    # 1) формируем payload ИСКЛЮЧИТЕЛЬНО из order_row
     payload = build_courier_payload(
         order_row,
         pickup_eta_at=pickup_eta_at,
+        eta_minutes=eta_minutes,
     )
 
     log.error(
         "[send_to_courier_and_persist] payload built | "
         f"order_id={payload.get('order_id')} "
-        f"pickup_eta_at={payload.get('pickup_eta_at')!r}"
+        f"pickup_eta_at={payload.get('pickup_eta_at')!r} "
+        f"price_krw={payload.get('price_krw')!r}"
     )
 
-    # === NEW: регистрируем заказ в Web API ===
+    # 2) регистрируем заказ в Web API (best-effort, не ломает флоу)
     try:
         await create_webapi_order({
             "order_id": payload["order_id"],
             "source": "kitchen",
-            "kitchen_id": 1,  # или вычисляй, если есть
+            "kitchen_id": 1,
             "client_tg_id": payload["client_tg_id"],
             "client_name": payload["client_name"],
             "client_phone": payload["client_phone"],
@@ -2181,13 +2262,14 @@ async def send_to_courier_and_persist(
             "pickup_eta_at": payload["pickup_eta_at"],
             "city": payload["city"],
             "comment": payload.get("comment"),
+            # ⚠️ ВАЖНО: цена берется ИЗ payload
+            "price_krw": payload.get("price_krw"),
         })
-    except Exception as e:
+    except Exception:
         log.exception("[send_to_courier_and_persist] WebAPI create_order failed")
-        # ❗️ВАЖНО: не ломаем флоу кухни
+        # ❗️ не ломаем флоу кухни
 
-
-    # 2) финальная защита перед HTTP
+    # 3) финальная защита перед отправкой курьеру
     if not payload.get("pickup_eta_at"):
         payload["pickup_eta_at"] = datetime.now(timezone.utc).isoformat()
         log.error(
@@ -2196,18 +2278,17 @@ async def send_to_courier_and_persist(
         )
 
     try:
-        # 3) вызов курьерки
+        # 4) вызов курьерки
         log.error("[send_to_courier_and_persist] BEFORE courier_create_order")
         res = await courier_create_order(payload)
         log.error(f"[send_to_courier_and_persist] AFTER courier_create_order res={res!r}")
 
-        # ⬇️ КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ
         if res.get("status") != "ok":
             raise RuntimeError(f"courier response not ok: {res!r}")
 
-        external_id = res.get("delivery_order_id", "") or ""
+        external_id = res.get("delivery_order_id") or ""
 
-        # 4) фиксируем успешную отправку
+        # 5) фиксируем успех в Sheets
         sheet.values().batchUpdate(
             spreadsheetId=SPREADSHEET_ID,
             body={
@@ -2217,7 +2298,10 @@ async def send_to_courier_and_persist(
                     {"range": f"orders!T{target_idx}", "values": [["courier_requested"]]},
                     {"range": f"orders!X{target_idx}", "values": [["ok"]]},
                     {"range": f"orders!Y{target_idx}", "values": [[""]]},
-                    {"range": f"orders!Z{target_idx}", "values": [[datetime.now(timezone.utc).isoformat()]]},
+                    {
+                        "range": f"orders!Z{target_idx}",
+                        "values": [[datetime.now(timezone.utc).isoformat()]],
+                    },
                 ],
             },
         ).execute()
@@ -3172,11 +3256,18 @@ def build_checkout_preview(
     kind_label: str,
     comment: str,
     address: str | None = None,
+    delivery_price_krw: int | None = None,
 ) -> str:
     kind = "delivery" if kind_label == "Доставка" else "pickup"
 
     subtotal = cart_total(cart)
-    delivery_fee = calc_delivery_fee(cart, kind)
+    
+    # Используем цену из геокодинга, если есть
+    if delivery_price_krw is not None:
+        delivery_fee = delivery_price_krw
+    else:
+        delivery_fee = calc_delivery_fee(cart, kind)
+    
     total = subtotal + delivery_fee
 
     address_block = (

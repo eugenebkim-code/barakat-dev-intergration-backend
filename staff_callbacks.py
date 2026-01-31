@@ -35,10 +35,19 @@ async def staff_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         pass
 
-    try:
-        _, action, order_id = data.split(":", 2)
-    except ValueError:
+    parts = data.split(":")
+
+    if len(parts) < 3:
         log.error(f"Bad callback data format: {data}")
+        return
+
+    prefix = parts[0]
+    action = parts[1]
+    order_id = parts[2]
+
+    # принимаем ТОЛЬКО решение стафа
+    if prefix != "staff" or action not in ("approve", "reject"):
+        log.info(f"Skip non-staff-decision callback: {data}")
         return
 
     decision = "approved" if action == "approve" else "rejected"
