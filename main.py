@@ -3495,6 +3495,13 @@ def main():
         )
     )
 
+    app.add_handler(
+        CallbackQueryHandler(
+            marketplace_back,
+            pattern=r"^market:back$"
+        )
+    )
+
     # -------- COMMANDS --------
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("restart", restart_cmd))

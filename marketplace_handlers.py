@@ -30,6 +30,22 @@ def kb_kitchen_select():
 # Handlers
 # ---------
 
+async def marketplace_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+
+    # сбрасываем выбранную кухню
+    context.user_data.pop("kitchen_id", None)
+    context.user_data.pop("spreadsheet_id", None)
+
+    await q.message.delete()
+
+    await q.message.bot.send_message(
+        chat_id=q.message.chat_id,
+        text="Выберите заведение:",
+        reply_markup=kb_kitchen_select(),
+    )
+
 async def marketplace_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     /market — entry point for marketplace
