@@ -21,8 +21,11 @@ log = logging.getLogger("MARKETPLACE")
 
 def kb_kitchen_select():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🍽 Заведение 1", callback_data="marketplace:kitchen:kitchen_1")],
-        [InlineKeyboardButton("🍽 Заведение 2", callback_data="marketplace:kitchen:kitchen_2")],
+        [InlineKeyboardButton("🥟 Восток & Азия", callback_data="marketplace:kitchen:kitchen_1")],
+        [InlineKeyboardButton("🍣 Tokyo Roll", callback_data="marketplace:kitchen:kitchen_2")],
+        [InlineKeyboardButton("🥘 Русский Дом", callback_data="marketplace:kitchen:kitchen_3")],
+        [InlineKeyboardButton("🍔 Urban Grill", callback_data="marketplace:kitchen:kitchen_4")],
+        [InlineKeyboardButton("🌯 Street Food Hub", callback_data="marketplace:kitchen:kitchen_5")],
     ])
 
 # ---------
@@ -108,13 +111,13 @@ async def marketplace_select_kitchen(update: Update, context: ContextTypes.DEFAU
 
     data = q.data or ""
 
-    # ожидаем: marketplace:kitchen:kitchen_1
+    # ожидаем: marketplace:kitchen:DASTARKHAN
     parts = data.split(":", 2)
     if len(parts) != 3:
         log.warning(f"Bad kitchen select callback: {data}")
         return
 
-    _, _, kitchen_id = parts  # "kitchen_1" / "kitchen_2"
+    _, _, kitchen_id = parts  # "DASTARKHAN" / "kitchen_2"
 
     # на всякий, чтобы registry был загружен
     try:

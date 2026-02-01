@@ -1947,7 +1947,7 @@ async def on_staff_decision(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(
             chat_id=chat_id,
             text="Через сколько должен приехать курьер?",
-            reply_markup=kb_staff_pickup_eta(order_id),
+            reply_markup=kb_staff_pickup_eta(order_id, kitchen_id=kitchen.kitchen_id),
         )
 
         try:
@@ -2108,9 +2108,16 @@ async def on_staff_eta(update: Update, context: ContextTypes.DEFAULT_TYPE):
     service = get_sheets_service()
     sheet = service.spreadsheets()
 
+    # 1️⃣ сначала ПАРСИМ callback
     _, _, minutes, order_id = q.data.split(":", 3)
     minutes = int(minutes)
 
+    # 2️⃣ затем резолвим кухню
+    from kitchen_context import require
+    kitchen = require(kitchen_id)
+    spreadsheet_id = kitchen.spreadsheet_id
+
+    # 3️⃣ формируем ETA
     pickup_eta_at = datetime.utcnow().isoformat() + "+00:00"
 
     # --- защита от повторного решения ---
