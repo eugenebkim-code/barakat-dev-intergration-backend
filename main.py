@@ -178,23 +178,21 @@ def get_kitchen_address_cached() -> str:
     except:
         return "ADDRESS_NOT_SET"
 
-def get_kitchen_city_cached() -> str:
-    if "city" in _KITCHEN_ADDRESS_CACHE:
-        return _KITCHEN_ADDRESS_CACHE["city"]
-    
+def get_kitchen_city_cached(*, kitchen: KitchenContext) -> str | None:
     try:
         service = get_sheets_service()
         result = service.spreadsheets().values().get(
-            spreadsheetId=SPREADSHEET_ID,
+            spreadsheetId=kitchen.spreadsheet_id,
             range="kitchen!C1",
         ).execute()
-        
+
         values = result.get("values", [])
-        city = values[0][0] if values else "CITY_NOT_SET"
-        _KITCHEN_ADDRESS_CACHE["city"] = city
-        return city
-    except:
-        return "CITY_NOT_SET"
+        if values and values[0]:
+            return values[0][0].strip()
+    except Exception:
+        pass
+
+    return None
 
 def save_user_contacts(
     *,
@@ -460,6 +458,8 @@ def append_product_to_sheets(
         return None
 
 def save_order_to_sheets(
+    *,
+    kitchen: KitchenContext,
     user,
     cart: dict,
     kind: str,
@@ -478,7 +478,7 @@ def save_order_to_sheets(
     subtotal = 0
 
     for pid, qty in cart.items():
-        p = get_product_by_id(pid)
+        p = get_product_by_id(pid, kitchen=kitchen)
         if not p:
             continue
         items.append(f"{p['name']} x{qty}")
@@ -538,6 +538,7 @@ def save_order_to_sheets(
         "created",                    # AC commission_status
         "",                           # AD owner_debt_snapshot
     ]
+
     log.info(
         "[save_order_to_sheets] order_id=%s kind=%s subtotal=%s delivery_fee=%s payment_proof=%s",
         order_id,
@@ -546,13 +547,14 @@ def save_order_to_sheets(
         delivery_fee,
         bool(payment_photo_file_id),
     )
+
     try:
         # Валидация ПЕРЕД записью
         #validate_order_row(row_values)
         
         # Находим следующую пустую строку
         existing = sheet.values().get(
-            spreadsheetId=SPREADSHEET_ID,
+            spreadsheetId=kitchen.spreadsheet_id,
             range=ORDERS_RANGE,
         ).execute().get("values", [])
         
@@ -566,7 +568,7 @@ def save_order_to_sheets(
         
         # Используем update вместо append для гарантии правильной позиции
         resp = sheet.values().update(
-            spreadsheetId=SPREADSHEET_ID,
+            spreadsheetId=kitchen.spreadsheet_id,
             range=target_range,
             valueInputOption="RAW",
             body={"values": [row_values]},
@@ -1158,10 +1160,13 @@ async def dash_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # -------------------------
 
 async def on_checkout_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    kitchen = get_active_kitchen(context)  # 👈 ВАЖНО: фикс скоупа
+
     log.info(
         f"[CHECKOUT REPLY] chat={update.effective_chat.id} "
         f"text={update.message.text!r} "
-        f"step={context.user_data.get('checkout')}"
+        f"step={context.user_data.get('checkout')} "
+        f"kitchen={kitchen.kitchen_id if kitchen else None}"
     )
     if update.effective_chat.id in STAFF_CHAT_IDS:
         return
@@ -1226,7 +1231,7 @@ async def on_checkout_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         # 🔗 WEB API: verify address
-        city_code = get_kitchen_city_cached() or "unknown"
+        city_code = get_kitchen_city_cached(kitchen=kitchen) or "unknown"
         check = webapi_check_address(city_code, text)
         if not check or not check.get("ok"):
             await msg.reply_text(
@@ -1449,9 +1454,9 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         import uuid
         
         order_id = str(uuid.uuid4())
-
-        pickup_address = get_kitchen_address_cached()
-        city_code = get_kitchen_city_cached()
+        kitchen = get_active_kitchen(context)
+        pickup_address = get_kitchen_address_cached(kitchen=kitchen)
+        city_code = get_kitchen_city_cached(kitchen=kitchen) or "unknown"
 
         if not pickup_address:
             pickup_address = "KITCHEN_ADDRESS_NOT_SET"
@@ -1462,12 +1467,13 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # 🔒 Гарантия pickup_eta_at для доставки
         if checkout.get("type") == "delivery":
             if not checkout.get("pickup_eta_at"):
-                checkout["pickup_eta_at"] = datetime.utcnow().isoformat()
+                from datetime import datetime, UTC
+                checkout["pickup_eta_at"] = datetime.now(UTC).isoformat()
 
         order_payload = {
             "order_id": order_id,
             "source": "kitchen",
-            "kitchen_id": kitchen_id,
+            "kitchen_id": kitchen.kitchen_id,
             "client_tg_id": user.id,
             "client_name": checkout.get("real_name"),
             "client_phone": checkout.get("phone_number"),
@@ -1554,6 +1560,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # ⬇️ ТОЛЬКО ТЕПЕРЬ пишем в Sheets
         saved = save_order_to_sheets(
+            kitchen=kitchen,                # 👈 ВАЖНО
             user=user,
             cart=cart,
             kind=kind_label,
@@ -1562,10 +1569,11 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             order_id=order_id,
             external_delivery_ref=external_delivery_ref,
             delivery_fee=checkout.get("delivery_price_krw"),
-            payment_photo_file_id=checkout.get("payment_photo_file_id"),  # 👈 ВАЖНО
+            payment_photo_file_id=checkout.get("payment_photo_file_id"),
         )
-        await notify_staff(context.bot, order_id)
+        await notify_staff(context.bot, kitchen, order_id)
         save_user_contacts(
+            kitchen=kitchen,                # 👈 обязательно
             user_id=user.id,
             real_name=checkout.get("real_name"),
             phone_number=checkout.get("phone_number"),
@@ -1773,8 +1781,11 @@ async def on_buyer_payment_photo(update: Update, context: ContextTypes.DEFAULT_T
     kind_label = "Самовывоз" if kind == "pickup" else "Доставка"
     comment = checkout.get("comment", "")
 
+    kitchen = get_active_kitchen(context)
+
     preview_text = build_checkout_preview(
         cart=cart,
+        kitchen=kitchen,
         kind_label=kind_label,
         comment=checkout.get("comment"),
         address=checkout.get("address"),
@@ -3097,15 +3108,6 @@ def get_kitchen_address_cached(
 
     return None
 
-def get_kitchen_city_cached():
-    try:
-        rows = get_sheet_values("kitchen")
-        # ожидаем строку: ["kitchen", "서울특별시", "dunpo"]
-        if rows and len(rows[0]) >= 3:
-            return rows[0][2].strip()
-    except Exception:
-        pass
-    return None
 
 # -------------------------
 # main/helpers
