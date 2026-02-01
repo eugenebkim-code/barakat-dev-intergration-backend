@@ -9,7 +9,7 @@ from telegram import (
 from telegram.ext import ContextTypes
 from telegram import Update
 from telegram.ext import ContextTypes
-from kitchen_context import require
+from kitchen_context import load_registry, require
 
 
 log = logging.getLogger("MARKETPLACE")
@@ -21,11 +21,26 @@ log = logging.getLogger("MARKETPLACE")
 
 def kb_kitchen_select():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🍽 Заведение 1", callback_data="marketplace:kitchen:1")],
-        [InlineKeyboardButton("🍽 Заведение 2", callback_data="marketplace:kitchen:2")],
+        [InlineKeyboardButton("🍽 Заведение 1", callback_data="marketplace:kitchen:kitchen_1")],
+        [InlineKeyboardButton("🍽 Заведение 2", callback_data="marketplace:kitchen:kitchen_2")],
     ])
 
+# ---------
+# helpers
+# ---------
 
+def get_active_kitchen(context):
+    from kitchen_context import require, load_registry, RegistryNotLoaded
+
+    kitchen_id = context.user_data.get("kitchen_id")
+    if not kitchen_id:
+        return None
+
+    try:
+        return require(kitchen_id)
+    except RegistryNotLoaded:
+        load_registry()
+        return require(kitchen_id)
 # ---------
 # Handlers
 # ---------
@@ -34,15 +49,16 @@ async def marketplace_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
 
-    # сбрасываем выбранную кухню
     context.user_data.pop("kitchen_id", None)
-    context.user_data.pop("spreadsheet_id", None)
 
-    await q.message.delete()
+    try:
+        await q.message.delete()
+    except Exception:
+        pass
 
-    await q.message.bot.send_message(
+    await context.bot.send_message(
         chat_id=q.message.chat_id,
-        text="Выберите заведение:",
+        text="Выберите кухню:",
         reply_markup=kb_kitchen_select(),
     )
 
@@ -67,53 +83,52 @@ async def marketplace_select_kitchen(update: Update, context: ContextTypes.DEFAU
     q = update.callback_query
     await q.answer()
 
-    try:
-        _, _, kitchen_id_str = q.data.split(":", 2)
-        kitchen_id = int(kitchen_id_str)
-    except Exception:
-        log.warning(f"Bad kitchen select callback: {q.data}")
+    data = q.data or ""
+
+    # ожидаем: marketplace:kitchen:kitchen_1
+    parts = data.split(":", 2)
+    if len(parts) != 3:
+        log.warning(f"Bad kitchen select callback: {data}")
         return
 
-    # MVP SHORT-CIRCUIT
-    # кухня 1 живет БЕЗ registry
-    if kitchen_id == 1:
-        context.user_data["kitchen_id"] = 1
-        try:
-            from main import render_home
+    _, _, kitchen_id = parts  # "kitchen_1" / "kitchen_2"
 
-            await q.message.delete()
-            await render_home(context, q.message.chat_id)
-            return
-        except Exception:
-            log.exception("Failed to render home for kitchen 1")
-            await q.edit_message_text("Ошибка перехода на страницу заведения")
-            return
+    # на всякий, чтобы registry был загружен
+    try:
+        from kitchen_context import load_registry
+        load_registry()
+    except Exception as e:
+        log.error(f"Registry load failed: {e}")
 
-    # дальше — ТОЛЬКО registry кухни
     try:
         kitchen = require(kitchen_id)
     except Exception as e:
         log.error(f"Kitchen select failed: {e}")
-        await q.edit_message_text("Заведение недоступна")
+        await q.edit_message_text("Кухня недоступна")
         return
 
     context.user_data["kitchen_id"] = kitchen.kitchen_id
-    context.user_data["spreadsheet_id"] = kitchen.spreadsheet_id
 
-    await q.edit_message_text(
-        text=(
-            f"<b>{kitchen.name}</b>\n"
-            f"Город: {kitchen.city}\n\n"
-            "Страница заведения открыта. Можно оформлять заказ."
-        ),
-        parse_mode="HTML",
-    )
+    # если нам нужен сразу переход на обычный home, то лучше не edit, а удалить и рендерить home
+    try:
+        await q.message.delete()
+    except Exception:
+        pass
+    from main import render_home
+    await render_home(context, q.message.chat_id)
 
 async def marketplace_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
 
     data = q.data or ""
+
+    # 🔁 возврат к выбору кухни
+    if data == "market:back":
+        context.user_data.pop("kitchen_id", None)
+        await q.message.delete()
+        await marketplace_start(update, context)
+        return
 
     # ожидаем формат: market:kitchen:<id>
     parts = data.split(":")
@@ -125,9 +140,7 @@ async def marketplace_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     # фиксируем выбранную кухню
     context.user_data["kitchen_id"] = kitchen_id
 
-    # можно сохранить еще имя кухни, если хочешь
-    # context.user_data["kitchen_name"] = ...
-
     # после выбора — обычный home
     await q.message.delete()
+    from main import render_home
     await render_home(context, q.message.chat_id)

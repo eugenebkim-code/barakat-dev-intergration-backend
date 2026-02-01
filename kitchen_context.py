@@ -60,7 +60,7 @@ class KitchenContext:
     Все остальные части системы обязаны
     получать данные ТОЛЬКО отсюда.
     """
-    kitchen_id: str
+    kitchen_id: int
     status: str
 
     spreadsheet_id: str
@@ -125,9 +125,9 @@ def load_registry(force: bool = False) -> None:
         "kitchen_1": KitchenContext(
             kitchen_id="kitchen_1",
             status="active",
-            spreadsheet_id="SHEET_ID_1",
-            owner_chat_id=111,
-            staff_chat_ids={111, 222},
+            spreadsheet_id="1dQFxRHsS2yFSV5rzB_q4q5WLv2GPaB2Gyawm2ZudPx4",
+            owner_chat_id=2115245228,
+            staff_chat_ids={2115245228},
             city="Asan",
             timezone=None,
             commission_pct=0.0,
@@ -140,9 +140,9 @@ def load_registry(force: bool = False) -> None:
         "kitchen_2": KitchenContext(
             kitchen_id="kitchen_2",
             status="active",
-            spreadsheet_id="SHEET_ID_2",
-            owner_chat_id=333,
-            staff_chat_ids={333, 444},
+            spreadsheet_id="1oAFB9Xihqbdph217AEfXlPNTjuZVAlBr7UU4JDOmygQ".strip(),
+            owner_chat_id=2115245228,
+            staff_chat_ids={2115245228},
             city="Asan",
             timezone=None,
             commission_pct=0.0,
@@ -229,7 +229,7 @@ def is_owner(kitchen: KitchenContext, user_id: int) -> bool:
     return user_id == kitchen.owner_chat_id
 
 
-def list_kitchens() -> Set[str]:
+def list_kitchens() -> Set[int]:
     """
     Для диагностики и логов.
     """

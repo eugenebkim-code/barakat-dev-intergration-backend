@@ -93,8 +93,10 @@ from marketplace_handlers import (
     marketplace_start,
     marketplace_select_kitchen,
     marketplace_callback,
+    marketplace_back,
 )
-
+from marketplace_handlers import get_active_kitchen
+from kitchen_context import KitchenContext
 from config import (
     BOT_TOKEN,
     OWNER_CHAT_ID_INT,
@@ -194,12 +196,18 @@ def get_kitchen_city_cached() -> str:
     except:
         return "CITY_NOT_SET"
 
-def save_user_contacts(user_id: int, real_name: str, phone_number: str):
+def save_user_contacts(
+    *,
+    kitchen: KitchenContext,
+    user_id: int,
+    real_name: str,
+    phone_number: str,
+) -> bool:
     service = get_sheets_service()
     sheet = service.spreadsheets()
 
     result = sheet.values().get(
-        spreadsheetId=SPREADSHEET_ID,
+        spreadsheetId=kitchen.spreadsheet_id,
         range="users!A2:F",
     ).execute()
 
@@ -215,7 +223,7 @@ def save_user_contacts(user_id: int, real_name: str, phone_number: str):
         return False
 
     sheet.values().batchUpdate(
-        spreadsheetId=SPREADSHEET_ID,
+        spreadsheetId=kitchen.spreadsheet_id,
         body={
             "valueInputOption": "RAW",
             "data": [
@@ -238,12 +246,16 @@ def _get_cart(context: ContextTypes.DEFAULT_TYPE) -> Dict[str, int]:
         context.user_data["cart"] = cart
     return cart
 
-def set_product_price(product_id: str, price: int):
+def set_product_price(
+    kitchen: "KitchenContext",
+    product_id: str,
+    price: int,
+) -> bool:
     service = get_sheets_service()
     sheet = service.spreadsheets()
 
     result = sheet.values().get(
-        spreadsheetId=SPREADSHEET_ID,
+        spreadsheetId=kitchen.spreadsheet_id,
         range="products!A2:A",
     ).execute()
 
@@ -261,7 +273,7 @@ def set_product_price(product_id: str, price: int):
     customer_price = calc_customer_price(price)
 
     sheet.values().batchUpdate(
-        spreadsheetId=SPREADSHEET_ID,
+        spreadsheetId=kitchen.spreadsheet_id,
         body={
             "valueInputOption": "RAW",
             "data": [
@@ -307,14 +319,52 @@ def safe_open_photo(path: str):
     except Exception:
         return None
 
-def read_products_from_sheets() -> list[dict]:
+from typing import Optional
+
+def read_products_from_sheets(
+    kitchen: "KitchenContext",
+) -> list[dict]:
     service = get_sheets_service()
     sheet = service.spreadsheets()
 
-    result = sheet.values().get(
-        spreadsheetId=SPREADSHEET_ID,
-        range="products!A2:M",
-    ).execute()
+    logger.info(
+        f"[READ_PRODUCTS] kitchen_id={kitchen.kitchen_id} "
+        f"spreadsheet_id={kitchen.spreadsheet_id} "
+        f"range=products!A2:M"
+    )
+
+    try:
+        meta = service.spreadsheets().get(
+            spreadsheetId=kitchen.spreadsheet_id
+        ).execute()
+
+        sheet_titles = [
+            s["properties"]["title"]
+            for s in meta.get("sheets", [])
+        ]
+
+        logger.info(
+            f"[READ_PRODUCTS] kitchen_id={kitchen.kitchen_id} "
+            f"available_sheets={sheet_titles}"
+        )
+    except Exception as e:
+        logger.error(
+            f"[READ_PRODUCTS] metadata fetch failed "
+            f"kitchen_id={kitchen.kitchen_id} err={e}"
+        )
+
+    try:
+        result = sheet.values().get(
+            spreadsheetId=kitchen.spreadsheet_id,
+            range="products!A2:M",
+        ).execute()
+    except Exception:
+        logger.exception(
+            f"[READ_PRODUCTS] FAILED "
+            f"kitchen_id={kitchen.kitchen_id} "
+            f"spreadsheet_id={kitchen.spreadsheet_id}"
+        )
+        return []
 
     rows = result.get("values", [])
     products: list[dict] = []
@@ -329,9 +379,6 @@ def read_products_from_sheets() -> list[dict]:
         except Exception:
             continue  # битая строка, пропускаем
 
-        # customer_price:
-        # 1) если колонка M есть и заполнена
-        # 2) иначе считаем по формуле
         if len(row) > 12 and row[12]:
             try:
                 customer_price = int(row[12])
@@ -345,7 +392,7 @@ def read_products_from_sheets() -> list[dict]:
             "name": row[1],
             "owner_price": owner_price,
             "customer_price": customer_price,
-            "available": row[3].lower() == "true",
+            "available": str(row[3]).strip().lower() == "true",
             "category": row[4],
             "photo_file_id": row[5] if len(row) > 5 else None,
             "description": row[6] if len(row) > 6 else None,
@@ -375,7 +422,13 @@ _bot_instance = Bot(token=BOT_TOKEN)
 
 from uuid import uuid4
 
-def append_product_to_sheets(name: str, price: int, category: str, description: str) -> str | None:
+def append_product_to_sheets(
+    kitchen: "KitchenContext",
+    name: str,
+    price: int,
+    category: str,
+    description: str,
+) -> str | None:
     service = get_sheets_service()
     sheet = service.spreadsheets()
 
@@ -397,7 +450,7 @@ def append_product_to_sheets(name: str, price: int, category: str, description: 
 
     try:
         sheet.values().append(
-            spreadsheetId=SPREADSHEET_ID,
+            spreadsheetId=kitchen.spreadsheet_id,
             range="products!A:G",
             valueInputOption="RAW",
             body={"values": [row]},
@@ -548,12 +601,13 @@ def set_waiting_photo(context: ContextTypes.DEFAULT_TYPE, product_id: str):
 def pop_waiting_photo(context: ContextTypes.DEFAULT_TYPE) -> str | None:
     return context.user_data.pop("waiting_photo_for", None)
 
-def cart_total(cart: Dict[str, int]) -> int:
+def cart_total(cart: Dict[str, int], kitchen) -> int:
     total = 0
     for pid, qty in cart.items():
-        p = get_product_by_id(pid)
-        if p:
-            total += p["customer_price"] * qty
+        p = get_product_by_id(pid, kitchen)
+        if not p:
+            continue
+        total += p["customer_price"] * qty
     return total
 
 def calc_delivery_fee(cart: dict, kind: str) -> int:
@@ -564,13 +618,13 @@ def calc_delivery_fee(cart: dict, kind: str) -> int:
     result = webapi_calculate_delivery(cart, address=None)
     return int(result.get("price", 0))
 
-def cart_text(cart: Dict[str, int]) -> str:
+def cart_text(cart: Dict[str, int], kitchen) -> str:
     if not cart:
         return "Корзина пустая."
 
     lines: List[str] = []
     for pid, qty in cart.items():
-        p = get_product_by_id(pid)
+        p = get_product_by_id(pid, kitchen)
         if not p:
             continue
         lines.append(
@@ -578,7 +632,7 @@ def cart_text(cart: Dict[str, int]) -> str:
         )
 
     lines.append("")
-    lines.append(f"Итого: {_fmt_money(cart_total(cart))}")
+    lines.append(f"Итого: {_fmt_money(cart_total(cart, kitchen))}")
     return "\n".join(lines)
 
 
@@ -618,7 +672,9 @@ def kb_home() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🥘 Каталог", callback_data="home:catalog")],
         [InlineKeyboardButton("🧺 Корзина", callback_data="home:cart")],
         [InlineKeyboardButton("ℹ️ Как заказать", callback_data="home:help")],
+        [InlineKeyboardButton("🔁 Сменить заведение", callback_data="market:back")],
     ])
+
 
 def kb_checkout_send() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
@@ -627,8 +683,8 @@ def kb_checkout_send() -> InlineKeyboardMarkup:
     ])
 
 
-def kb_products(category: str) -> InlineKeyboardMarkup:
-    products = read_products_from_sheets()
+def kb_products(category: str, kitchen) -> InlineKeyboardMarkup:
+    products = read_products_from_sheets(kitchen)
 
     rows = []
     for p in products:
@@ -742,42 +798,41 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # -------------------------
 # render screens (always: clear -> send)
 # -------------------------
-def home_text() -> str:
+def home_text(kitchen):
     return (
-        "РАДУГА ДУНПО 🌈\n"
-        "Магазин русских товаров и домашней выпечки\n\n"
-        "📍🚚 Доставка по Дунпо 4.000 ₩ .\n"
-        "🆓 Бесплатно от 50.000 ₩.\n"
-        "🥘 📞 Для справок: 010-XXXX-XXXX\n"
-        
-        "💳 Оплата переводом на счет магазина\n\n"
-        "Всегда начинайте Ваш заказ написав команду /start прямо в чат Telegram.\n\n"        
-        "👇\n"
-        "ЧТОБЫ СДЕЛАТЬ ЗАКАЗ\n\n"
-        "⬇️НАЖМИТЕ КНОПКУ WebApp⬇️\n"
+        f"<b>{kitchen.kitchen_id}</b>\n"
+        f"Город: {kitchen.city}\n\n"
+        "Выберите действие:"
     )
 
+
+
 async def render_home(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
+    from marketplace_handlers import get_active_kitchen
+    kitchen = get_active_kitchen(context)
+
     nav = _get_nav(context)
     nav["screen"] = "home"
 
-    kitchen_id = context.user_data.get("kitchen_id", "kitchen_1")
-    header = f"🏠 Кухня: {kitchen_id}\n\n"
-
     await clear_ui(context, chat_id)
+
     msg = await context.bot.send_message(
         chat_id=chat_id,
-        text=header + home_text(),
+        text=home_text(kitchen),  # 👈 передаем кухню
         parse_mode=ParseMode.HTML,
         reply_markup=kb_home(),
     )
     track_msg(context, msg.message_id)
 
-async def render_categories(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
-    nav = _get_nav(context)
-    nav["screen"] = "categories"
+from kitchen_context import KitchenContext
 
-    products = read_products_from_sheets()
+async def render_categories(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+):
+    kitchen: KitchenContext = get_active_kitchen(context)
+
+    products = read_products_from_sheets(kitchen)
     categories = get_categories_from_products(products)
 
     await clear_ui(context, chat_id)
@@ -871,7 +926,8 @@ async def send_category_preview(
 
 
 async def render_product_card(context: ContextTypes.DEFAULT_TYPE, chat_id: int, pid: str):
-    p = get_product_by_id(pid)
+    kitchen = get_active_kitchen(context)
+    p = get_product_by_id(pid, kitchen)
     if not p:
         await render_categories(context, chat_id)
         return
@@ -918,9 +974,11 @@ async def render_cart(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
     nav["screen"] = "cart"
     cart = _get_cart(context)
 
+    kitchen = get_active_kitchen(context)
+
     await clear_ui(context, chat_id)
 
-    text = "🧺 <b>Корзина</b>\n\n" + cart_text(cart)
+    text = "🧺 <b>Корзина</b>\n\n" + cart_text(cart, kitchen)
     m = await context.bot.send_message(
         chat_id=chat_id,
         text=text,
@@ -962,11 +1020,13 @@ async def render_product_list(
 
     await clear_ui(context, chat_id)
 
+    kitchen = get_active_kitchen(context)
+
     msg = await context.bot.send_message(
         chat_id=chat_id,
         text=f"📦 <b>{category}</b>\nВыберите позицию:",
         parse_mode=ParseMode.HTML,
-        reply_markup=kb_products(category),
+        reply_markup=kb_products(category, kitchen),
     )
     track_msg(context, msg.message_id)
 
@@ -1231,12 +1291,15 @@ async def on_checkout_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kind = checkout.get("type", "pickup")
     kind_label = "Самовывоз" if kind == "pickup" else "Доставка"
 
+    kitchen = get_active_kitchen(context)
+
     preview_text = build_checkout_preview(
         cart=cart,
+        kitchen=kitchen,
         kind_label=kind_label,
         comment=text,
         address=checkout.get("address"),
-        delivery_price_krw=checkout.get("delivery_price_krw"),  # 👈 ДОБАВИТЬ
+        delivery_price_krw=checkout.get("delivery_price_krw"),
     )
 
     await clear_ui(context, chat_id)
@@ -1534,7 +1597,8 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         init_checkout(context)
         checkout = context.user_data["checkout"]
 
-        profile = get_user_profile(q.from_user.id)
+        kitchen = get_active_kitchen(context)
+        profile = get_user_profile(kitchen, q.from_user.id)
         
         if profile and profile.get("real_name") and profile.get("phone_number"):
             checkout.update({
@@ -2683,21 +2747,39 @@ async def on_owner_commission_paid_cancel(update: Update, context: ContextTypes.
     except Exception:
         pass
 
-def get_user_profile(user_id: int) -> dict | None:
+def get_user_profile(
+    kitchen: KitchenContext,
+    user_id: int,
+) -> dict | None:
     service = get_sheets_service()
     sheet = service.spreadsheets()
 
-    rows = sheet.values().get(
-        spreadsheetId=SPREADSHEET_ID,
-        range="users!A:F",
-    ).execute().get("values", [])
+    rows = (
+        sheet.values()
+        .get(
+            spreadsheetId=kitchen.spreadsheet_id,
+            range="users!A:F",
+        )
+        .execute()
+        .get("values", [])
+    )
+
+    uid = str(user_id)
 
     for r in rows:
-        if r and r[0] == str(user_id):
+        if not r:
+            continue
+
+        # на случай, если первая строка это заголовки
+        if r[0].strip().lower() in ("user_id", "userid", "id"):
+            continue
+
+        if r[0] == uid:
             return {
                 "name": r[4] if len(r) > 4 else "",
                 "phone": r[5] if len(r) > 5 else "",
             }
+
     return None
 
 # -------------------------
@@ -2986,22 +3068,31 @@ async def on_staff_description(update: Update, context: ContextTypes.DEFAULT_TYP
 
 _KITCHEN_CACHE = {"address": None, "loaded_at": 0}
 
-def get_kitchen_address_cached(ttl=300):
+def get_kitchen_address_cached(
+    *,
+    kitchen: KitchenContext,
+    ttl: int = 300,
+) -> str | None:
     now = time.time()
-    if _KITCHEN_CACHE["address"] and now - _KITCHEN_CACHE["loaded_at"] < ttl:
-        return _KITCHEN_CACHE["address"]
+
+    cache = _KITCHEN_CACHE.get(kitchen.kitchen_id)
+    if cache and cache.get("address") and now - cache["loaded_at"] < ttl:
+        return cache["address"]
 
     service = get_sheets_service()
     sheet = service.spreadsheets()
+
     rows = sheet.values().get(
-        spreadsheetId=SPREADSHEET_ID,
+        spreadsheetId=kitchen.spreadsheet_id,
         range="kitchen!A:B",
     ).execute().get("values", [])
 
     for r in rows:
         if len(r) >= 2 and r[0] == "address":
-            _KITCHEN_CACHE["address"] = r[1]
-            _KITCHEN_CACHE["loaded_at"] = now
+            _KITCHEN_CACHE[kitchen.kitchen_id] = {
+                "address": r[1],
+                "loaded_at": now,
+            }
             return r[1]
 
     return None
@@ -3032,12 +3123,17 @@ def init_checkout(context):
     }
 
 
-def set_product_description(product_id: str, description: str):
+def set_product_description(
+    kitchen: KitchenContext,
+    product_id: str,
+    description: str,
+) -> bool:
+
     service = get_sheets_service()
     sheet = service.spreadsheets()
 
     result = sheet.values().get(
-        spreadsheetId=SPREADSHEET_ID,
+        spreadsheetId=kitchen.spreadsheet_id,
         range="products!A2:A",
     ).execute()
 
@@ -3053,7 +3149,7 @@ def set_product_description(product_id: str, description: str):
         return False
 
     sheet.values().update(
-        spreadsheetId=SPREADSHEET_ID,
+        spreadsheetId=kitchen.spreadsheet_id,
         range=f"products!G{row_index}",
         valueInputOption="RAW",
         body={"values": [[description]]},
@@ -3094,12 +3190,16 @@ def register_user_if_new(user):
 
 
 
-def set_product_available(product_id: str, available: bool):
+def set_product_available(
+    kitchen: "KitchenContext",
+    product_id: str,
+    available: bool,
+) -> bool:
     service = get_sheets_service()
     sheet = service.spreadsheets()
 
     result = sheet.values().get(
-        spreadsheetId=SPREADSHEET_ID,
+        spreadsheetId=kitchen.spreadsheet_id,
         range="products!A2:A",
     ).execute()
 
@@ -3115,7 +3215,7 @@ def set_product_available(product_id: str, available: bool):
         return False
 
     sheet.values().update(
-        spreadsheetId=SPREADSHEET_ID,
+        spreadsheetId=kitchen.spreadsheet_id,
         range=f"products!D{row_index}",
         valueInputOption="RAW",
         body={"values": [["TRUE" if available else "FALSE"]]},
@@ -3123,12 +3223,16 @@ def set_product_available(product_id: str, available: bool):
 
     return True
 
-def set_product_photo(product_id: str, file_id: str):
+def set_product_photo(
+    kitchen: "KitchenContext",
+    product_id: str,
+    file_id: str,
+) -> bool:
     service = get_sheets_service()
     sheet = service.spreadsheets()
 
     result = sheet.values().get(
-        spreadsheetId=SPREADSHEET_ID,
+        spreadsheetId=kitchen.spreadsheet_id,
         range="products!A2:A",
     ).execute()
 
@@ -3144,8 +3248,8 @@ def set_product_photo(product_id: str, file_id: str):
         return False
 
     sheet.values().update(
-        spreadsheetId=SPREADSHEET_ID,
-        range=f"products!F{row_index}",  # ВОТ ТУТ F
+        spreadsheetId=kitchen.spreadsheet_id,
+        range=f"products!F{row_index}",
         valueInputOption="RAW",
         body={"values": [[file_id]]},
     ).execute()
@@ -3170,7 +3274,13 @@ def kb_catalog_controls() -> InlineKeyboardMarkup:
     ])
 
 async def render_catalog_categories(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
-    products = read_products_from_sheets()
+    from marketplace_handlers import get_active_kitchen
+
+    kitchen = get_active_kitchen(context)
+
+    products = read_products_from_sheets(
+        spreadsheet_id=kitchen.spreadsheet_id
+    )
     categories = sorted({
         p["category"] for p in products if p.get("category")
     })
@@ -3247,8 +3357,13 @@ async def render_catalog_products(
     chat_id: int,
     category: str,
 ):
+    from marketplace_handlers import get_active_kitchen
+    kitchen = get_active_kitchen(context)
+
     products = [
-        p for p in read_products_from_sheets()
+        p for p in read_products_from_sheets(
+            spreadsheet_id=kitchen.spreadsheet_id
+        )
         if p.get("category") == category
     ]
     context.user_data["catalog_category"] = category
@@ -3423,6 +3538,7 @@ from telegram import Bot
 
 def build_checkout_preview(
     cart: dict,
+    kitchen: KitchenContext,
     kind_label: str,
     comment: str,
     address: str | None = None,
@@ -3430,14 +3546,14 @@ def build_checkout_preview(
 ) -> str:
     kind = "delivery" if kind_label == "Доставка" else "pickup"
 
-    subtotal = cart_total(cart)
-    
+    subtotal = cart_total(cart, kitchen)
+
     # Используем цену из геокодинга, если есть
     if delivery_price_krw is not None:
         delivery_fee = delivery_price_krw
     else:
         delivery_fee = calc_delivery_fee(cart, kind)
-    
+
     total = subtotal + delivery_fee
 
     address_block = (
@@ -3454,7 +3570,7 @@ def build_checkout_preview(
 
     return (
         "🧾 <b>Проверьте заказ</b>\n\n"
-        f"{cart_text(cart)}\n\n"
+        f"{cart_text(cart, kitchen)}\n\n"
         f"{delivery_block}"
         f"💰 <b>Итого к оплате: {_fmt_money(total)}</b>\n\n"
         f"Способ: <b>{kind_label}</b>\n"
@@ -3479,6 +3595,12 @@ def main():
     #  )
 
     # -------- Marketplace Handlers --------
+    app.add_handler(
+        CallbackQueryHandler(
+            marketplace_back,
+            pattern=r"^market:back$"
+        )
+    )
     app.add_handler(CommandHandler("market", marketplace_start))
 
     app.add_handler(
@@ -3495,12 +3617,7 @@ def main():
         )
     )
 
-    app.add_handler(
-        CallbackQueryHandler(
-            marketplace_back,
-            pattern=r"^market:back$"
-        )
-    )
+    
 
     # -------- COMMANDS --------
     app.add_handler(CommandHandler("start", start_cmd))
@@ -3609,9 +3726,9 @@ def main():
         drop_pending_updates=True,
     )
 
-def get_product_by_id(pid: str) -> dict | None:
-    for p in read_products_from_sheets():
-        if p["product_id"] == pid:
+def get_product_by_id(product_id: str, kitchen):
+    for p in read_products_from_sheets(kitchen):
+        if p["product_id"] == product_id:
             return p
     return None
 
