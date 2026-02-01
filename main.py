@@ -760,10 +760,14 @@ def home_text() -> str:
 async def render_home(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
     nav = _get_nav(context)
     nav["screen"] = "home"
+
+    kitchen_id = context.user_data.get("kitchen_id", "kitchen_1")
+    header = f"🏠 Кухня: {kitchen_id}\n\n"
+
     await clear_ui(context, chat_id)
     msg = await context.bot.send_message(
         chat_id=chat_id,
-        text=home_text(),
+        text=header + home_text(),
         parse_mode=ParseMode.HTML,
         reply_markup=kb_home(),
     )

@@ -57,12 +57,18 @@ def get_sheets_service():
 # Orders
 # -------------------------------------------------
 
-def find_order_row_by_id(order_id: str) -> Tuple[Optional[int], Optional[dict]]:
+def find_order_row_by_id(
+    order_id: str,
+    *,
+    spreadsheet_id: Optional[str] = None,
+) -> Tuple[Optional[int], Optional[dict]]:
     service = get_sheets_service()
     sheet = service.spreadsheets()
 
+    sid = spreadsheet_id or SPREADSHEET_ID
+
     rows = sheet.values().get(
-        spreadsheetId=SPREADSHEET_ID,
+        spreadsheetId=sid,
         range=ORDERS_RANGE,
     ).execute().get("values", [])
 
@@ -70,8 +76,8 @@ def find_order_row_by_id(order_id: str) -> Tuple[Optional[int], Optional[dict]]:
         if row and row[0] == order_id:
             return idx, {
                 "order_id": row[0],
-                "created_at": row[1],
-                "user_id": row[2],
+                "created_at": row[1] if len(row) > 1 else "",
+                "user_id": row[2] if len(row) > 2 else "",
             }
 
     return None, None

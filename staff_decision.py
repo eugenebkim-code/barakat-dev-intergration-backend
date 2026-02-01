@@ -29,7 +29,13 @@ async def handle_staff_decision(
     now = datetime.now(timezone.utc)
 
     # 1️⃣ находим заказ
-    row_idx, order = find_order_row_by_id(order_id)
+    from utils_spreadsheet import get_active_spreadsheet_id
+
+    spreadsheet_id = get_active_spreadsheet_id(context)
+    row_idx, order = find_order_row_by_id(
+        order_id,
+        spreadsheet_id=spreadsheet_id,
+    )
     if not row_idx or not order:
         log.error(f"Order not found: {order_id}")
         return

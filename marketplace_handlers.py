@@ -58,24 +58,40 @@ async def marketplace_select_kitchen(update: Update, context: ContextTypes.DEFAU
         log.warning(f"Bad kitchen select callback: {q.data}")
         return
 
+    # MVP SHORT-CIRCUIT
+    # кухня 1 живет БЕЗ registry
+    if kitchen_id == 1:
+        context.user_data["kitchen_id"] = 1
+        try:
+            from main import render_home
+
+            await q.message.delete()
+            await render_home(context, q.message.chat_id)
+            return
+        except Exception:
+            log.exception("Failed to render home for kitchen 1")
+            await q.edit_message_text("Ошибка перехода на страницу заведения")
+            return
+
+    # дальше — ТОЛЬКО registry кухни
     try:
         kitchen = require(kitchen_id)
     except Exception as e:
         log.error(f"Kitchen select failed: {e}")
-        await q.edit_message_text("Кухня недоступна")
+        await q.edit_message_text("Заведение недоступна")
         return
 
     context.user_data["kitchen_id"] = kitchen.kitchen_id
+    context.user_data["spreadsheet_id"] = kitchen.spreadsheet_id
 
     await q.edit_message_text(
         text=(
             f"<b>{kitchen.name}</b>\n"
             f"Город: {kitchen.city}\n\n"
-            "Кухня выбрана. Можно оформлять заказ."
+            "Страница заведения открыта. Можно оформлять заказ."
         ),
         parse_mode="HTML",
     )
-
 
 async def marketplace_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
