@@ -121,54 +121,80 @@ async def staff_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             log.exception("Failed to delete staff message (rejected)")
         return
-
-    # 3) approved → фиксируем ожидание ETA (БЕЗ вызова курьера)
-    try:
-        service = get_sheets_service()
-        sheet = service.spreadsheets()
-
-        rows = sheet.values().get(
-            spreadsheetId=SPREADSHEET_ID,
-            range=ORDERS_RANGE,
-        ).execute().get("values", [])
-
-        target_idx = None
-        for i, r in enumerate(rows[1:], start=2):
-            if r and r[0] == order_id:
-                target_idx = i
+    
+     # 3) approved → фиксируем ожидание ETA и отправляем кнопки
+    
+    kitchen_id = None
+    order_row = None
+    target_idx = None
+    
+    # Ищем заказ во ВСЕХ кухнях
+    from kitchen_context import _REGISTRY
+    
+    service = get_sheets_service()
+    sheet = service.spreadsheets()
+    
+    for kid, kctx in _REGISTRY.items():
+        try:
+            rows = sheet.values().get(
+                spreadsheetId=kctx.spreadsheet_id,
+                range=ORDERS_RANGE,
+            ).execute().get("values", [])
+            
+            for i, r in enumerate(rows[1:], start=2):
+                if r and r[0] == order_id:
+                    kitchen_id = kid
+                    order_row = r
+                    target_idx = i
+                    break
+            
+            if kitchen_id:
                 break
+                
+        except Exception as e:
+            log.warning(f"Failed to search in kitchen {kid}: {e}")
+            continue
+    
+    if not kitchen_id or not order_row or not target_idx:
+        log.error(
+            f"order {order_id} not found in any kitchen. "
+            f"Checked: {list(_REGISTRY.keys())}"
+        )
+        return
+    
+    log.info(
+        f"✅ Order {order_id} found in kitchen {kitchen_id}, row {target_idx}"
+    )
+    
+    # Обновляем статус в ПРАВИЛЬНОЙ таблице
+    try:
+        sheet.values().update(
+            spreadsheetId=_REGISTRY[kitchen_id].spreadsheet_id,
+            range=f"orders!T{target_idx}",
+            valueInputOption="RAW",
+            body={"values": [["courier_pending_eta"]]},
+        ).execute()
 
-        if not target_idx:
-            log.error(f"order {order_id} not found while setting courier_pending_eta")
-        else:
-            sheet.values().update(
-                spreadsheetId=SPREADSHEET_ID,
-                range=f"orders!T{target_idx}",
-                valueInputOption="RAW",
-                body={"values": [["courier_pending_eta"]]},
-            ).execute()
-
-            log.info(
-                f"order {order_id} moved to courier_pending_eta "
-                f"(target_idx={target_idx})"
-            )
-
+        log.info(
+            f"order {order_id} moved to courier_pending_eta "
+            f"(kitchen={kitchen_id}, idx={target_idx})"
+        )
     except Exception:
         log.exception("Failed to update courier_pending_eta state")
+        return
 
-    # 4) кнопки ETA стафу
+    # 4) Отправляем кнопки ETA с kitchen_id
     try:
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
             text="Через сколько должен приехать курьер?",
-            reply_markup=kb_staff_pickup_eta(order_id),
+            reply_markup=kb_staff_pickup_eta(order_id, kitchen_id),
         )
+        log.info(f"✅ ETA buttons sent: order={order_id}, kitchen={kitchen_id}")
     except Exception:
-        log.exception(
-            f"failed to send ETA buttons to staff for order {order_id}"
-        )
+        log.exception(f"failed to send ETA buttons for order {order_id}")
 
-    # 5) удаляем исходное сообщение
+    # 5) Удаляем сообщение
     try:
         await query.message.delete()
         log.info(f"Staff message deleted for order {order_id} (approved)")

@@ -19,44 +19,81 @@ async def handle_staff_decision(
     context,
     bot: Bot,
     order_id: str,
-    decision: str,            # "approved" | "rejected"
+    decision: str,
     staff_user_id: int,
     staff_username: str | None,
 ):
-    """
-    Единственная точка обработки решения стафа
-    """
-
+    #\"\"\"
+    #Единственная точка обработки решения стафа.
+    #Ищет заказ во ВСЕХ кухнях.
+    #\"\"\"
+    from datetime import datetime, timezone
+    from kitchen_context import _REGISTRY
+    from sheets_repo import get_sheets_service, update_order_cells
+    from config import ORDERS_RANGE
+    import logging
+    
+    log = logging.getLogger("STAFF_DECISION")
     now = datetime.now(timezone.utc)
 
-    # 1️⃣ находим заказ
-    from utils_spreadsheet import get_active_spreadsheet_id
-
-    spreadsheet_id = get_active_spreadsheet_id(context)
-    row_idx, order = find_order_row_by_id(
-        order_id,
-        spreadsheet_id=spreadsheet_id,
-    )
-    if not row_idx or not order:
-        log.error(f"Order not found: {order_id}")
+    # 1️⃣ Ищем заказ во ВСЕХ кухнях
+    spreadsheet_id = None
+    row_idx = None
+    order_row = None
+    kitchen_id = None
+    
+    service = get_sheets_service()
+    sheet = service.spreadsheets()
+    
+    for kid, kctx in _REGISTRY.items():
+        try:
+            rows = sheet.values().get(
+                spreadsheetId=kctx.spreadsheet_id,
+                range=ORDERS_RANGE,
+            ).execute().get("values", [])
+            
+            for i, r in enumerate(rows[1:], start=2):
+                if r and r[0] == order_id:
+                    spreadsheet_id = kctx.spreadsheet_id
+                    kitchen_id = kid
+                    row_idx = i
+                    order_row = r
+                    break
+            
+            if spreadsheet_id:
+                break
+                
+        except Exception as e:
+            log.warning(f"Failed to search order in kitchen {kid}: {e}")
+            continue
+    
+    if not spreadsheet_id or not row_idx or not order_row:
+        log.error(
+            f"Order not found: {order_id}. "
+            f"Checked kitchens: {list(_REGISTRY.keys())}"
+        )
         return
-   
-    created_at = order.get("created_at")
-    user_id = order.get("user_id")
+    
+    log.info(
+        f"✅ Order {order_id} found in kitchen {kitchen_id} "
+        f"(spreadsheet={spreadsheet_id}, row={row_idx})"
+    )
+    
+    # Данные из строки
+    created_at = order_row[1] if len(order_row) > 1 else ""
+    user_id = order_row[2] if len(order_row) > 2 else ""
 
     if not created_at or not user_id:
-        log.error(f"Broken order data for {order_id}: {order}")
+        log.error(f"Broken order data for {order_id}")
         return
 
     created_dt = datetime.fromisoformat(created_at)
-
-    # если время без timezone — считаем, что это UTC
     if created_dt.tzinfo is None:
         created_dt = created_dt.replace(tzinfo=timezone.utc)
 
     reaction_seconds = int((now - created_dt).total_seconds())
 
-    # 2️⃣ обновляем Sheets
+    # 2️⃣ Обновляем в ПРАВИЛЬНОЙ таблице
     updates = {
         "status": decision,
         "handled_at": now.isoformat(),
@@ -64,22 +101,19 @@ async def handle_staff_decision(
         "reaction_seconds": reaction_seconds,
     }
 
-    try:
-        update_order_cells(row_idx, updates, spreadsheet_id=spreadsheet_id)
-    except TypeError:
-        update_order_cells(row_idx, updates)
+    update_order_cells(row_idx, updates, spreadsheet_id=spreadsheet_id)
 
-    # 3️⃣ уведомляем клиента
+    # 3️⃣ Уведомляем клиента
     client_chat_id = int(user_id)
 
     if decision == "approved":
         client_text = (
-            "Ваш заказ принят в работу 👍\n"
+            "Ваш заказ принят в работу 👍\\n"
             "Мы начали обработку и свяжемся с вами при необходимости."
         )
     else:
         client_text = (
-            "По вашему заказу возникли сложности.\n"
+            "По вашему заказу возникли сложности.\\n"
             "Мы свяжемся с вами в ближайшее время для уточнения деталей."
         )
 
@@ -94,5 +128,5 @@ async def handle_staff_decision(
 
     log.info(
         f"Order {order_id} handled: {decision}, "
-        f"reaction_seconds={reaction_seconds}"
+        f"kitchen={kitchen_id}, reaction_seconds={reaction_seconds}"
     )

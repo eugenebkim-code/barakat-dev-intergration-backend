@@ -83,9 +83,22 @@ def find_order_row_by_id(
     return None, None
 
 
-def update_order_cells(row_idx: int, updates: dict):
+def update_order_cells(
+    row_idx: int,
+    updates: dict,
+    spreadsheet_id: str | None = None,
+):
+    """
+    Обновляет ячейки заказа в таблице.
+
+    row_idx: номер строки заказа (1-based)
+    updates: словарь вида {column_name: value}
+    spreadsheet_id: ID таблицы (если None, используется глобальный)
+    """
     service = get_sheets_service()
     sheet = service.spreadsheets()
+
+    sid = spreadsheet_id or SPREADSHEET_ID
 
     col_map = {
         "status": "J",
@@ -95,12 +108,13 @@ def update_order_cells(row_idx: int, updates: dict):
     }
 
     for key, value in updates.items():
-        if key not in col_map:
+        col = col_map.get(key)
+        if not col:
             continue
 
         sheet.values().update(
-            spreadsheetId=SPREADSHEET_ID,
-            range=f"orders!{col_map[key]}{row_idx}",
+            spreadsheetId=sid,
+            range=f"orders!{col}{row_idx}",
             valueInputOption="RAW",
             body={"values": [[value]]},
         ).execute()

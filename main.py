@@ -2090,7 +2090,7 @@ DELIVERY_FEE = 4000
 # -------------------------
 
 async def on_staff_eta(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    log.error("### ENTER on_staff_eta ###")
+    log.info("=== ENTER on_staff_eta ===")
 
     q = update.callback_query
     await q.answer()
@@ -2099,30 +2099,48 @@ async def on_staff_eta(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if chat_id not in STAFF_CHAT_IDS:
         return
 
-    kitchen = get_active_kitchen(context)
-    if not kitchen:
-        log.error("on_staff_eta: kitchen not resolved")
+    # 1️⃣ Парсинг callback: staff:eta:10:kitchen_2:ORDER_123
+    parts = q.data.split(":")
+    if len(parts) != 5:
+        log.error(f"Invalid ETA callback format: {q.data}")
         return
+    
+    _, _, minutes_str, kitchen_id, order_id = parts
+    
+    try:
+        minutes = int(minutes_str)
+    except ValueError:
+        log.error(f"Invalid minutes: {minutes_str}")
+        return
+    
+    log.info(f"ETA: kitchen_id={kitchen_id}, order_id={order_id}, minutes={minutes}")
 
-    # 🔒 сервисы ОБЯЗАНЫ быть объявлены сразу
+    # 2️⃣ Получение kitchen ИЗ CALLBACK (НЕ из context.user_data!)
+    from kitchen_context import require
+    
+    try:
+        kitchen = require(kitchen_id)
+    except Exception as e:
+        log.error(f"Kitchen {kitchen_id} not found: {e}")
+        await q.answer("Кухня недоступна", show_alert=True)
+        return
+    
+    spreadsheet_id = kitchen.spreadsheet_id
+    log.info(f"Kitchen resolved: spreadsheet_id={spreadsheet_id}")
+
+    # 3️⃣ Подключение к Sheets
     service = get_sheets_service()
     sheet = service.spreadsheets()
 
-    # 1️⃣ сначала ПАРСИМ callback
-    _, _, minutes, order_id = q.data.split(":", 3)
-    minutes = int(minutes)
+    # 4️⃣ Формирование ETA
+    from datetime import timezone, timedelta
+    now = datetime.now(timezone.utc)
+    eta_dt = now + timedelta(minutes=minutes)
+    pickup_eta_at = eta_dt.isoformat()
 
-    # 2️⃣ затем резолвим кухню
-    from kitchen_context import require
-    kitchen = require(kitchen_id)
-    spreadsheet_id = kitchen.spreadsheet_id
-
-    # 3️⃣ формируем ETA
-    pickup_eta_at = datetime.utcnow().isoformat() + "+00:00"
-
-    # --- защита от повторного решения ---
+    # 5️⃣ Поиск заказа в ПРАВИЛЬНОЙ таблице
     rows = sheet.values().get(
-        spreadsheetId=kitchen.spreadsheet_id,
+        spreadsheetId=spreadsheet_id,  # ✅ ИЗ KITCHEN
         range=ORDERS_RANGE,
     ).execute().get("values", [])
 
@@ -2132,13 +2150,14 @@ async def on_staff_eta(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for i, r in enumerate(rows[1:], start=2):
         if r and r[0] == order_id:
             target_idx = i
-            current_status = r[19] if len(r) > 19 else ""  # колонка T
+            current_status = r[19] if len(r) > 19 else ""
             break
 
     if not target_idx:
-        log.error(f"order {order_id} not found while setting courier_pending_eta")
+        log.error(f"Order {order_id} not found in kitchen {kitchen_id}")
         return
 
+    # 6️⃣ Защита от повторного решения
     if current_status in ("courier_requested", "courier_not_requested"):
         await q.answer("Решение по курьеру уже принято", show_alert=True)
         try:
@@ -2147,9 +2166,9 @@ async def on_staff_eta(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
         return
 
-    # --- обновляем ETA и статус в Sheets ---
+    # 7️⃣ Обновление ETA в ПРАВИЛЬНОЙ таблице
     sheet.values().batchUpdate(
-        spreadsheetId=SPREADSHEET_ID,
+        spreadsheetId=spreadsheet_id,  # ✅ ИЗ KITCHEN
         body={
             "valueInputOption": "RAW",
             "data": [
@@ -2160,14 +2179,15 @@ async def on_staff_eta(update: Update, context: ContextTypes.DEFAULT_TYPE):
         },
     ).execute()
 
-    # --- перечитываем строку после записи ---
+    # 8️⃣ Перечитываем строку
     rows = sheet.values().get(
-        spreadsheetId=kitchen.spreadsheet_id,
+        spreadsheetId=spreadsheet_id,  # ✅ ИЗ KITCHEN
         range=ORDERS_RANGE,
     ).execute().get("values", [])
 
     order_row = rows[target_idx - 1]
 
+    # 9️⃣ Вызов курьера
     success = await send_to_courier_and_persist(
         order_row=order_row,
         target_idx=target_idx,
@@ -2177,13 +2197,15 @@ async def on_staff_eta(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     if not success:
-        log.error(f"❌ failed to send order {order_id} to courier")
+        log.error(f"Failed to send order {order_id} to courier")
 
+    # 🔟 Уведомление клиента
     buyer_chat_id = int(order_row[2])
     await context.bot.send_message(
         chat_id=buyer_chat_id,
         text=(
             "Ваш заказ принят в работу.\n"
+            f"Курьер приедет примерно через {minutes} минут.\n"
             "Вы можете отслеживать доставку в боте курьерской службы."
         ),
     )
@@ -2192,6 +2214,8 @@ async def on_staff_eta(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.message.delete()
     except Exception:
         pass
+    
+    log.info(f"=== EXIT on_staff_eta: {order_id} processed ===")
 
 async def on_staff_no_courier(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -2202,7 +2226,23 @@ async def on_staff_no_courier(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     # kitchen + spreadsheet (важно для мульти-кухонь)
-    kitchen = get_active_kitchen(context)
+    # Парсим callback: staff:no_courier:kitchen_id:order_id
+    parts = q.data.split(":")
+    if len(parts) != 4:
+        log.error(f"Invalid no_courier callback: {q.data}")
+        return
+
+    _, _, kitchen_id, order_id = parts
+
+    # Получаем kitchen из callback
+    from kitchen_context import require
+    try:
+        kitchen = require(kitchen_id)
+    except Exception as e:
+        log.error(f"Kitchen {kitchen_id} not found: {e}")
+        return
+
+    spreadsheet_id = kitchen.spreadsheet_id
     if not kitchen:
         log.error("on_staff_no_courier: kitchen not resolved")
         return
@@ -2544,13 +2584,41 @@ async def send_to_courier_and_persist(
     kitchen_id = payload.get("kitchen_id")
     if not kitchen_id:
         raise RuntimeError("kitchen_id missing in payload")
+    
+    # ✅ ДОБАВЛЕНО: Преобразование kitchen_id для WebAPI
+    # WebAPI ожидает INT, а не STRING
+    kitchen_id_for_webapi = None
+    
+    if isinstance(kitchen_id, str):
+        # Извлекаем число из "kitchen_5" → 5
+        if kitchen_id.startswith("kitchen_"):
+            try:
+                kitchen_id_for_webapi = int(kitchen_id.replace("kitchen_", ""))
+            except ValueError:
+                log.error(f"Invalid kitchen_id format: {kitchen_id}")
+                kitchen_id_for_webapi = 1  # fallback
+        else:
+            # Если просто число в строке "5"
+            try:
+                kitchen_id_for_webapi = int(kitchen_id)
+            except ValueError:
+                kitchen_id_for_webapi = 1
+    elif isinstance(kitchen_id, int):
+        kitchen_id_for_webapi = kitchen_id
+    else:
+        kitchen_id_for_webapi = 1
+    
+    log.info(
+        f"[send_to_courier_and_persist] kitchen_id conversion: "
+        f"{kitchen_id!r} → {kitchen_id_for_webapi} (type={type(kitchen_id_for_webapi)})"
+    )
 
     # 2) регистрируем заказ в Web API (best-effort, не ломает флоу)
     try:
         await create_webapi_order({
             "order_id": payload["order_id"],
             "source": "kitchen",
-            "kitchen_id": kitchen_id,
+            "kitchen_id": kitchen_id_for_webapi,
             "client_tg_id": payload["client_tg_id"],
             "client_name": payload["client_name"],
             "client_phone": payload["client_phone"],
