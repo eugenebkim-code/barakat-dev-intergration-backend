@@ -30,17 +30,40 @@ def kb_kitchen_select():
 # ---------
 
 def get_active_kitchen(context):
-    from kitchen_context import require, load_registry, RegistryNotLoaded
+    from kitchen_context import require, load_registry, RegistryNotLoaded, _REGISTRY
 
     kitchen_id = context.user_data.get("kitchen_id")
-    if not kitchen_id:
-        return None
 
     try:
-        return require(kitchen_id)
+        # 1️⃣ если kitchen_id есть — пробуем его
+        if kitchen_id:
+            return require(kitchen_id)
+
     except RegistryNotLoaded:
         load_registry()
-        return require(kitchen_id)
+        if kitchen_id:
+            try:
+                return require(kitchen_id)
+            except Exception:
+                pass
+
+    except Exception:
+        pass
+
+    # 2️⃣ fallback: берем первую активную кухню из реестра
+    try:
+        if not _REGISTRY:
+            load_registry()
+
+        for k in _REGISTRY.values():
+            if getattr(k, "status", "active") == "active":
+                context.user_data["kitchen_id"] = k.kitchen_id
+                return k
+    except Exception:
+        pass
+
+    # 3️⃣ если вообще ничего нет — это уже критика
+    return None
 # ---------
 # Handlers
 # ---------

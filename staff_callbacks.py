@@ -67,7 +67,11 @@ async def staff_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 1) основная бизнес-логика (статусы, метрики, уведомление клиента)
     try:
+        q = update.callback_query
+        staff_user = q.from_user
+
         await handle_staff_decision(
+            context=context,
             bot=context.bot,
             order_id=order_id,
             decision=decision,
@@ -87,12 +91,25 @@ async def staff_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 2) обновляем сообщение стафа
     try:
-        base_text = query.message.text or ""
-        await query.edit_message_text(
-            text=base_text + f"\n\n<b>{suffix}</b>",
-            parse_mode=ParseMode.HTML,
-        )
+        msg = query.message
+
+        if msg.text:
+            base_text = msg.text
+            await msg.edit_text(
+                text=base_text + f"\n\n<b>{suffix}</b>",
+                parse_mode=ParseMode.HTML,
+                reply_markup=msg.reply_markup,
+            )
+        else:
+            base_caption = msg.caption or ""
+            await msg.edit_caption(
+                caption=base_caption + f"\n\n<b>{suffix}</b>",
+                parse_mode=ParseMode.HTML,
+                reply_markup=msg.reply_markup,
+            )
+
         log.info(f"Staff message updated for order {order_id}")
+
     except Exception:
         log.exception("Failed to edit staff message")
 

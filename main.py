@@ -832,9 +832,28 @@ async def render_categories(
     context: ContextTypes.DEFAULT_TYPE,
     chat_id: int,
 ):
-    kitchen: KitchenContext = get_active_kitchen(context)
+    kitchen = get_active_kitchen(context)
+    if not kitchen:
+        await clear_ui(context, chat_id)
+        msg = await context.bot.send_message(
+            chat_id=chat_id,
+            text="Каталог временно недоступен (кухня не выбрана).",
+        )
+        track_msg(context, msg.message_id)
+        return
 
-    products = read_products_from_sheets(kitchen)
+    try:
+        products = read_products_from_sheets(kitchen)
+    except Exception:
+        log.exception("[render_categories] read_products_from_sheets failed kitchen=%s", getattr(kitchen, "kitchen_id", None))
+        await clear_ui(context, chat_id)
+        msg = await context.bot.send_message(
+            chat_id=chat_id,
+            text="Каталог временно недоступен.",
+        )
+        track_msg(context, msg.message_id)
+        return
+
     categories = get_categories_from_products(products)
 
     await clear_ui(context, chat_id)
@@ -2072,6 +2091,7 @@ DELIVERY_FEE = 4000
 
 async def on_staff_eta(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log.error("### ENTER on_staff_eta ###")
+
     q = update.callback_query
     await q.answer()
 
@@ -2079,17 +2099,23 @@ async def on_staff_eta(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if chat_id not in STAFF_CHAT_IDS:
         return
 
-    _, _, minutes, order_id = q.data.split(":", 3)
-    minutes = int(minutes)
-    from datetime import timezone
-    pickup_eta_at = datetime.utcnow().isoformat() + "+00:00"
+    kitchen = get_active_kitchen(context)
+    if not kitchen:
+        log.error("on_staff_eta: kitchen not resolved")
+        return
 
+    # 🔒 сервисы ОБЯЗАНЫ быть объявлены сразу
     service = get_sheets_service()
     sheet = service.spreadsheets()
 
+    _, _, minutes, order_id = q.data.split(":", 3)
+    minutes = int(minutes)
+
+    pickup_eta_at = datetime.utcnow().isoformat() + "+00:00"
+
     # --- защита от повторного решения ---
     rows = sheet.values().get(
-        spreadsheetId=SPREADSHEET_ID,
+        spreadsheetId=kitchen.spreadsheet_id,
         range=ORDERS_RANGE,
     ).execute().get("values", [])
 
@@ -2103,6 +2129,7 @@ async def on_staff_eta(update: Update, context: ContextTypes.DEFAULT_TYPE):
             break
 
     if not target_idx:
+        log.error(f"order {order_id} not found while setting courier_pending_eta")
         return
 
     if current_status in ("courier_requested", "courier_not_requested"):
@@ -2126,26 +2153,25 @@ async def on_staff_eta(update: Update, context: ContextTypes.DEFAULT_TYPE):
         },
     ).execute()
 
-    # --- повторно перечитываем строку (после записи ETA) ---
+    # --- перечитываем строку после записи ---
     rows = sheet.values().get(
-        spreadsheetId=SPREADSHEET_ID,
+        spreadsheetId=kitchen.spreadsheet_id,
         range=ORDERS_RANGE,
     ).execute().get("values", [])
 
     order_row = rows[target_idx - 1]
 
-    # --- отправляем заказ в курьерку (ОДИН раз, с явным ETA) ---
     success = await send_to_courier_and_persist(
         order_row=order_row,
         target_idx=target_idx,
         pickup_eta_at=pickup_eta_at,
         eta_minutes=minutes,
+        kitchen=kitchen,
     )
 
     if not success:
         log.error(f"❌ failed to send order {order_id} to courier")
 
-    # --- уведомляем клиента ---
     buyer_chat_id = int(order_row[2])
     await context.bot.send_message(
         chat_id=buyer_chat_id,
@@ -2168,13 +2194,20 @@ async def on_staff_no_courier(update: Update, context: ContextTypes.DEFAULT_TYPE
     if chat_id not in STAFF_CHAT_IDS:
         return
 
+    # kitchen + spreadsheet (важно для мульти-кухонь)
+    kitchen = get_active_kitchen(context)
+    if not kitchen:
+        log.error("on_staff_no_courier: kitchen not resolved")
+        return
+    spreadsheet_id = kitchen.spreadsheet_id
+
     _, _, order_id = q.data.split(":", 2)
 
     service = get_sheets_service()
     sheet = service.spreadsheets()
 
     rows = sheet.values().get(
-        spreadsheetId=SPREADSHEET_ID,
+        spreadsheetId=kitchen.spreadsheet_id,
         range=ORDERS_RANGE,
     ).execute().get("values", [])
 
@@ -2182,7 +2215,7 @@ async def on_staff_no_courier(update: Update, context: ContextTypes.DEFAULT_TYPE
     service = get_sheets_service()
     sheet = service.spreadsheets()
     rows = sheet.values().get(
-        spreadsheetId=SPREADSHEET_ID,
+        spreadsheetId=kitchen.spreadsheet_id,
         range=ORDERS_RANGE,
     ).execute().get("values", [])
 
@@ -2227,9 +2260,8 @@ async def on_staff_no_courier(update: Update, context: ContextTypes.DEFAULT_TYPE
     except Exception as e:
         log.warning(f"⚠️ courier cancel failed for order {order_id}: {e}")
 
-
     sheet.values().batchUpdate(
-        spreadsheetId=SPREADSHEET_ID,
+        spreadsheetId=spreadsheet_id,
         body={
             "valueInputOption": "RAW",
             "data": [
@@ -2239,7 +2271,7 @@ async def on_staff_no_courier(update: Update, context: ContextTypes.DEFAULT_TYPE
         },
     ).execute()
 
-    buyer_chat_id = int(rows[target_idx-1][2])
+    buyer_chat_id = int(rows[target_idx - 1][2])
     await context.bot.send_message(
         chat_id=buyer_chat_id,
         text="Ваш заказ принят. Курьер вызываться не будет.",
@@ -2469,9 +2501,17 @@ async def send_to_courier_and_persist(
     *,
     pickup_eta_at: str | None = None,
     eta_minutes: int | None = None,
+    kitchen=None,
 ):
     service = get_sheets_service()
     sheet = service.spreadsheets()
+
+    # spreadsheetId должен быть кухни, если мы ее знаем
+    spreadsheet_id = None
+    if kitchen is not None:
+        spreadsheet_id = getattr(kitchen, "spreadsheet_id", None)
+    if not spreadsheet_id:
+        spreadsheet_id = SPREADSHEET_ID
 
     # 1) формируем payload ИСКЛЮЧИТЕЛЬНО из order_row
     payload = build_courier_payload(
@@ -2480,8 +2520,12 @@ async def send_to_courier_and_persist(
         eta_minutes=eta_minutes,
     )
 
-    payload["pickup_address"] = payload["pickup_address"] or "충남 아산시 둔포면 둔포중앙로161번길 21-2"
-    payload["city"] = payload["city"] or "dunpo"
+    payload["pickup_address"] = payload.get("pickup_address") or "충남 아산시 둔포면 둔포중앙로161번길 21-2"
+    payload["city"] = payload.get("city") or "dunpo"
+
+    # страховка kitchen_id для мультикухни
+    if not payload.get("kitchen_id") and kitchen is not None:
+        payload["kitchen_id"] = getattr(kitchen, "kitchen_id", None)
 
     log.error(
         "[send_to_courier_and_persist] payload built | "
@@ -2489,9 +2533,11 @@ async def send_to_courier_and_persist(
         f"pickup_eta_at={payload.get('pickup_eta_at')!r} "
         f"price_krw={payload.get('price_krw')!r}"
     )
+
     kitchen_id = payload.get("kitchen_id")
     if not kitchen_id:
         raise RuntimeError("kitchen_id missing in payload")
+
     # 2) регистрируем заказ в Web API (best-effort, не ломает флоу)
     try:
         await create_webapi_order({
@@ -2503,7 +2549,7 @@ async def send_to_courier_and_persist(
             "client_phone": payload["client_phone"],
             "pickup_address": payload["pickup_address"],
             "delivery_address": payload["delivery_address"],
-            "pickup_eta_at": payload["pickup_eta_at"],
+            "pickup_eta_at": payload.get("pickup_eta_at"),
             "city": payload["city"],
             "comment": payload.get("comment"),
             # ⚠️ ВАЖНО: цена берется ИЗ payload
@@ -2535,7 +2581,7 @@ async def send_to_courier_and_persist(
 
         # 5) фиксируем успех в Sheets
         sheet.values().batchUpdate(
-            spreadsheetId=SPREADSHEET_ID,
+            spreadsheetId=spreadsheet_id,
             body={
                 "valueInputOption": "RAW",
                 "data": [
@@ -2563,7 +2609,7 @@ async def send_to_courier_and_persist(
         )
 
         sheet.values().batchUpdate(
-            spreadsheetId=SPREADSHEET_ID,
+            spreadsheetId=spreadsheet_id,
             body={
                 "valueInputOption": "RAW",
                 "data": [
@@ -3408,13 +3454,44 @@ async def render_catalog_products(
         )
         track_msg(context, m.message_id)
 
-async def notify_staff(bot, order_id: str):
+async def notify_staff(bot, kitchen_or_order_id, maybe_order_id: str | None = None):
     log.error("🔥🔥🔥 notify_staff CALLED")
+
+    # поддержка двух вариантов вызова:
+    # 1) notify_staff(bot, order_id)
+    # 2) notify_staff(bot, kitchen, order_id)
+    if maybe_order_id is None:
+        kitchen = None
+        order_id = str(kitchen_or_order_id)
+    else:
+        kitchen = kitchen_or_order_id
+        order_id = str(maybe_order_id)
+
+    # локальный список получателей: если передали kitchen, шлем только ему
+    staff_chat_ids = None
+    if kitchen is not None:
+        staff_chat_ids = getattr(kitchen, "staff_chat_ids", None)
+        owner_chat_id = getattr(kitchen, "owner_chat_id", None)
+        try:
+            staff_chat_ids = set(staff_chat_ids or [])
+        except Exception:
+            staff_chat_ids = set()
+        if owner_chat_id:
+            staff_chat_ids.add(owner_chat_id)
+    else:
+        staff_chat_ids = set(STAFF_CHAT_IDS)
+
     service = get_sheets_service()
+    spreadsheet_id = (
+        kitchen.spreadsheet_id
+        if kitchen is not None
+        else SPREADSHEET_ID
+    )
+
     rows = service.spreadsheets().values().get(
-        spreadsheetId=SPREADSHEET_ID,
-        range=ORDERS_RANGE,
-    ).execute().get("values", [])
+    spreadsheetId=spreadsheet_id,
+    range=ORDERS_RANGE,
+).execute().get("values", [])
 
     if len(rows) < 2:
         return None
@@ -3450,7 +3527,7 @@ async def notify_staff(bot, order_id: str):
 
     service = get_sheets_service()
     users = service.spreadsheets().values().get(
-        spreadsheetId=SPREADSHEET_ID,
+        spreadsheetId=spreadsheet_id,
         range="users!A:F",
     ).execute().get("values", [])
 
@@ -3486,7 +3563,7 @@ async def notify_staff(bot, order_id: str):
 
     first_msg = None
 
-    for staff_id in STAFF_CHAT_IDS:
+    for staff_id in staff_chat_ids:
         try:
             if payment_file_id:
                 msg = await bot.send_photo(

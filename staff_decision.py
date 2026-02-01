@@ -16,6 +16,7 @@ log = logging.getLogger("STAFF_DECISION")
 
 async def handle_staff_decision(
     *,
+    context,
     bot: Bot,
     order_id: str,
     decision: str,            # "approved" | "rejected"
@@ -39,9 +40,7 @@ async def handle_staff_decision(
     if not row_idx or not order:
         log.error(f"Order not found: {order_id}")
         return
-    
-    now = datetime.now(timezone.utc)
-
+   
     created_at = order.get("created_at")
     user_id = order.get("user_id")
 
@@ -65,7 +64,10 @@ async def handle_staff_decision(
         "reaction_seconds": reaction_seconds,
     }
 
-    update_order_cells(row_idx, updates)
+    try:
+        update_order_cells(row_idx, updates, spreadsheet_id=spreadsheet_id)
+    except TypeError:
+        update_order_cells(row_idx, updates)
 
     # 3️⃣ уведомляем клиента
     client_chat_id = int(user_id)
