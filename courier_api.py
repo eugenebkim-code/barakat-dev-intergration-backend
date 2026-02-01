@@ -3,6 +3,7 @@
 import os
 import logging
 import httpx
+import json
 
 log = logging.getLogger("COURIER_API")
 
@@ -38,6 +39,10 @@ async def courier_create_order(payload: dict) -> dict:
 
         if resp.status_code != 200:
             log.error(
+                f"[COURIER_API] Request FAILED\n"
+                f"Status: {resp.status_code}\n"
+                f"Response: {resp.text}\n"  # ← ВОТ ЭТО ПОКАЖЕТ ЧТО НЕ ТАК
+                f"Payload: {json.dumps(payload, indent=2)}"
                 f"COURIER create_order failed "
                 f"status={resp.status_code} body={resp.text}"
             )

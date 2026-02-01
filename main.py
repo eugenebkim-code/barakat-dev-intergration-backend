@@ -148,6 +148,44 @@ log = logging.getLogger("FlowerShopKR")
 # helpers: storage
 # -------------------------
 
+_KITCHEN_ADDRESS_CACHE = {}
+
+def get_kitchen_address_cached() -> str:
+    if "address" in _KITCHEN_ADDRESS_CACHE:
+        return _KITCHEN_ADDRESS_CACHE["address"]
+    
+    try:
+        service = get_sheets_service()
+        result = service.spreadsheets().values().get(
+            spreadsheetId=SPREADSHEET_ID,
+            range="kitchen!B1",
+        ).execute()
+        
+        values = result.get("values", [])
+        address = values[0][0] if values else "ADDRESS_NOT_SET"
+        _KITCHEN_ADDRESS_CACHE["address"] = address
+        return address
+    except:
+        return "ADDRESS_NOT_SET"
+
+def get_kitchen_city_cached() -> str:
+    if "city" in _KITCHEN_ADDRESS_CACHE:
+        return _KITCHEN_ADDRESS_CACHE["city"]
+    
+    try:
+        service = get_sheets_service()
+        result = service.spreadsheets().values().get(
+            spreadsheetId=SPREADSHEET_ID,
+            range="kitchen!C1",
+        ).execute()
+        
+        values = result.get("values", [])
+        city = values[0][0] if values else "CITY_NOT_SET"
+        _KITCHEN_ADDRESS_CACHE["city"] = city
+        return city
+    except:
+        return "CITY_NOT_SET"
+
 def save_user_contacts(user_id: int, real_name: str, phone_number: str):
     service = get_sheets_service()
     sheet = service.spreadsheets()
@@ -1949,8 +1987,8 @@ async def on_staff_eta(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     _, _, minutes, order_id = q.data.split(":", 3)
     minutes = int(minutes)
-
-    pickup_eta_at = (datetime.utcnow() + timedelta(minutes=minutes)).isoformat()
+    from datetime import timezone
+    pickup_eta_at = datetime.utcnow().isoformat() + "+00:00"
 
     service = get_sheets_service()
     sheet = service.spreadsheets()
@@ -2294,6 +2332,9 @@ async def send_to_courier_and_persist(
         eta_minutes=eta_minutes,
     )
 
+    payload["pickup_address"] = payload["pickup_address"] or "충남 아산시 둔포면 둔포중앙로161번길 21-2"
+    payload["city"] = payload["city"] or "dunpo"
+
     log.error(
         "[send_to_courier_and_persist] payload built | "
         f"order_id={payload.get('order_id')} "
@@ -2317,6 +2358,7 @@ async def send_to_courier_and_persist(
             "comment": payload.get("comment"),
             # ⚠️ ВАЖНО: цена берется ИЗ payload
             "price_krw": payload.get("price_krw"),
+            "eta_minutes": eta_minutes,
         })
     except Exception:
         log.exception("[send_to_courier_and_persist] WebAPI create_order failed")
