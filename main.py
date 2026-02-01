@@ -38,6 +38,8 @@ try:
 except ImportError:
     WEBAPI_AVAILABLE = False
 
+    from kitchen_context import require
+
     async def webapi_create_order(payload: dict) -> dict:
         log.warning("⚠️ Web API unavailable, using STUB webapi_create_order")
         return {
@@ -74,6 +76,7 @@ from telegram.ext import (
     ConversationHandler,
     MessageHandler,
     filters,
+    ApplicationBuilder,
 )
 from sheets_repo import get_sheets_service
 from google.oauth2 import service_account
@@ -86,6 +89,11 @@ from telegram.ext import CallbackQueryHandler
 from staff_callbacks import staff_callback
 from keyboards_staff import kb_staff_pickup_eta
 from courier_api import courier_create_order
+from marketplace_handlers import (
+    marketplace_start,
+    marketplace_select_kitchen,
+    marketplace_callback,
+)
 
 from config import (
     BOT_TOKEN,
@@ -966,6 +974,13 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     register_user_if_new(user)
 
     chat_id = update.effective_chat.id
+
+    # если кухня еще не выбрана — показываем маркетплейс
+    if not context.user_data.get("kitchen_id"):
+        await marketplace_start(update, context)
+        return
+
+    # если кухня уже выбрана — обычный домашний экран
     await render_home(context, chat_id)
 
 async def dash_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1385,7 +1400,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         order_payload = {
             "order_id": order_id,
             "source": "kitchen",
-            "kitchen_id": 1,  # ⬅️ ОБЯЗАТЕЛЬНО
+            "kitchen_id": kitchen_id,
             "client_tg_id": user.id,
             "client_name": checkout.get("real_name"),
             "client_phone": checkout.get("phone_number"),
@@ -2292,6 +2307,12 @@ WEB_API_URL = os.getenv("WEB_API_URL", "http://127.0.0.1:8000")
 WEB_API_KEY = os.getenv("WEB_API_KEY", os.getenv("API_KEY", "DEV_KEY"))
 
 
+import json
+import httpx
+import logging
+
+log = logging.getLogger("WEBAPI_CLIENT")
+
 async def create_webapi_order(payload: dict) -> dict:
     """
     Kitchen registers order in Web API (idempotent).
@@ -2299,20 +2320,68 @@ async def create_webapi_order(payload: dict) -> dict:
     """
     url = f"{WEB_API_URL}/api/v1/orders"
 
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        resp = await client.post(
+    # полезно для трассировки и идемпотентности на стороне Web API
+    order_id = payload.get("order_id")
+    kitchen_id = payload.get("kitchen_id")
+
+    timeout = httpx.Timeout(connect=5.0, read=10.0, write=10.0, pool=5.0)
+
+    headers = {
+        "X-API-KEY": WEB_API_KEY,
+        "X-ROLE": "kitchen",
+    }
+    if order_id:
+        headers["X-IDEMPOTENCY-KEY"] = str(order_id)
+
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.post(url, json=payload, headers=headers)
+
+    except httpx.TimeoutException as e:
+        log.warning(
+            "[create_webapi_order] timeout | order_id=%r kitchen_id=%r url=%s err=%s",
+            order_id,
+            kitchen_id,
             url,
-            json=payload,
-            headers={
-                "X-API-KEY": WEB_API_KEY,
-                "X-ROLE": "kitchen",
-            },
+            repr(e),
         )
+        raise
+
+    except httpx.RequestError as e:
+        log.warning(
+            "[create_webapi_order] request error | order_id=%r kitchen_id=%r url=%s err=%s",
+            order_id,
+            kitchen_id,
+            url,
+            repr(e),
+        )
+        raise
 
     if resp.status_code != 200:
-        raise RuntimeError(f"WebAPI create_order failed {resp.status_code}: {resp.text[:500]}")
+        body_preview = (resp.text or "")[:500]
+        log.warning(
+            "[create_webapi_order] bad status | %s | order_id=%r kitchen_id=%r body=%r",
+            resp.status_code,
+            order_id,
+            kitchen_id,
+            body_preview,
+        )
+        raise RuntimeError(
+            f"WebAPI create_order failed {resp.status_code}: {body_preview}"
+        )
 
-    return resp.json()
+    # иногда сервер может вернуть не-json (например html 502 прокси)
+    try:
+        return resp.json()
+    except json.JSONDecodeError:
+        body_preview = (resp.text or "")[:500]
+        log.warning(
+            "[create_webapi_order] non-json response | order_id=%r kitchen_id=%r body=%r",
+            order_id,
+            kitchen_id,
+            body_preview,
+        )
+        raise RuntimeError(f"WebAPI create_order returned non-json: {body_preview}")
 
 from datetime import datetime, timezone
 async def send_to_courier_and_persist(
@@ -2341,13 +2410,15 @@ async def send_to_courier_and_persist(
         f"pickup_eta_at={payload.get('pickup_eta_at')!r} "
         f"price_krw={payload.get('price_krw')!r}"
     )
-
+    kitchen_id = payload.get("kitchen_id")
+    if not kitchen_id:
+        raise RuntimeError("kitchen_id missing in payload")
     # 2) регистрируем заказ в Web API (best-effort, не ломает флоу)
     try:
         await create_webapi_order({
             "order_id": payload["order_id"],
             "source": "kitchen",
-            "kitchen_id": 1,
+            "kitchen_id": kitchen_id,
             "client_tg_id": payload["client_tg_id"],
             "client_name": payload["client_name"],
             "client_phone": payload["client_phone"],
@@ -3389,24 +3460,42 @@ def build_checkout_preview(
     )
 
 def main():
-    
-    
     app = Application.builder().token(BOT_TOKEN).build()
+    # 🔗 пробрасываем render_home в marketplace
+    app.bot_data["render_home"] = render_home
     from webapp_orders_sync import webapp_orders_job
 
-  #  app.job_queue.run_repeating(
-  #      webapp_orders_job,
-  #      interval=5,
-  #      first=5,
-  #      data={
-  #          "spreadsheet_id": SPREADSHEET_ID,
-  #      },
-  #  )
+    #  app.job_queue.run_repeating(
+    #      webapp_orders_job,
+    #      interval=5,
+    #      first=5,
+    #      data={
+    #          "spreadsheet_id": SPREADSHEET_ID,
+    #      },
+    #  )
+
+    # -------- Marketplace Handlers --------
+    app.add_handler(CommandHandler("market", marketplace_start))
+
+    app.add_handler(
+        CallbackQueryHandler(
+            marketplace_select_kitchen,
+            pattern=r"^marketplace:kitchen:"
+        )
+    )
+
+    app.add_handler(
+        CallbackQueryHandler(
+            marketplace_callback,
+            pattern=r"^market:"
+        )
+    )
+
     # -------- COMMANDS --------
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("restart", restart_cmd))
     app.add_handler(CommandHandler("clear", clear_cmd))
-    app.add_handler(CommandHandler("help", help_cmd))  # ← ВОТ ЭТОГО НЕ ХВАТАЛО
+    app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("catalog", catalog_cmd))
     app.add_handler(CommandHandler("dash", dash_cmd))
 
@@ -3418,56 +3507,18 @@ def main():
         ),
         group=1
     )
+
     # -------- WEB API --------
-
-    app.add_handler(
-        CallbackQueryHandler(on_staff_eta, pattern=r"^staff:eta:\d+:")
-    )
-
-    app.add_handler(
-        CallbackQueryHandler(on_staff_no_courier, pattern=r"^staff:no_courier:")
-    )
-
-    app.add_handler(
-        CallbackQueryHandler(
-            on_staff_eta_manual_click,
-            pattern=r"^staff:eta_manual:"
-        )
-    )
-
-    app.add_handler(
-        CallbackQueryHandler(on_owner_commission_paid, pattern=r"^owner:commission_paid$")
-    )
-
-
-    app.add_handler(
-        CallbackQueryHandler(on_staff_courier_retry, pattern=r"^staff:courier_retry:")
-    )
-
-    app.add_handler(
-        CallbackQueryHandler(
-            on_owner_commission_paid_confirm,
-            pattern=r"^owner:commission_paid_confirm$"
-        )
-    )
-
-    app.add_handler(
-        CallbackQueryHandler(
-            on_owner_commission_paid,
-            pattern=r"^owner:commission_paid_apply$"
-        )
-    )
-
-    app.add_handler(
-        CallbackQueryHandler(
-            on_owner_commission_paid_cancel,
-            pattern=r"^owner:commission_paid_cancel$"
-        )
-    )
+    app.add_handler(CallbackQueryHandler(on_staff_eta, pattern=r"^staff:eta:\d+:"))
+    app.add_handler(CallbackQueryHandler(on_staff_no_courier, pattern=r"^staff:no_courier:"))
+    app.add_handler(CallbackQueryHandler(on_staff_eta_manual_click, pattern=r"^staff:eta_manual:"))
+    app.add_handler(CallbackQueryHandler(on_owner_commission_paid, pattern=r"^owner:commission_paid$"))
+    app.add_handler(CallbackQueryHandler(on_staff_courier_retry, pattern=r"^staff:courier_retry:"))
+    app.add_handler(CallbackQueryHandler(on_owner_commission_paid_confirm, pattern=r"^owner:commission_paid_confirm$"))
+    app.add_handler(CallbackQueryHandler(on_owner_commission_paid, pattern=r"^owner:commission_paid_apply$"))
+    app.add_handler(CallbackQueryHandler(on_owner_commission_paid_cancel, pattern=r"^owner:commission_paid_cancel$"))
 
     # -------- CALLBACKS (ВСЕ КНОПКИ) --------
-
-    # ✅ ЕДИНСТВЕННЫЙ staff handler
     app.add_handler(
         CallbackQueryHandler(
             staff_callback,
@@ -3489,13 +3540,14 @@ def main():
         )
     )
 
+    # -------- BUYER PHOTO (payment proof) --------
     app.add_handler(
         MessageHandler(
-            (filters.PHOTO | filters.Document.IMAGE)
-            & ~filters.Chat(STAFF_CHAT_IDS),
+            (filters.PHOTO | filters.Document.IMAGE) & ~filters.Chat(STAFF_CHAT_IDS),
             on_buyer_payment_photo
         )
     )
+
     # -------- STAFF --------
     app.add_handler(
         MessageHandler(
@@ -3503,7 +3555,7 @@ def main():
             on_staff_photo
         )
     )
-    
+
     # -------- STAFF TEXT --------
     app.add_handler(
         MessageHandler(
@@ -3512,14 +3564,25 @@ def main():
         ),
         group=10
     )
+
     app.bot_data["SHEETS_SERVICE"] = None
-    # ✅ ВОТ СЮДА
+
     register_broadcast_handlers(
         app,
         owner_chat_id=OWNER_CHAT_ID_INT,
         staff_chat_ids=STAFF_CHAT_IDS,
         sheets_service=None,
         spreadsheet_id=SPREADSHEET_ID,
+    )
+
+    log.info("Bot started")
+    app.run_polling(
+        allowed_updates=[
+            "message",
+            "callback_query",
+            "web_app_data",
+        ],
+        drop_pending_updates=True,
     )
 
     
@@ -3547,6 +3610,7 @@ def get_categories_from_products(products: list[dict]) -> list[str]:
         for p in products
         if p["available"] and p.get("category")
     })
+
 
 # -------------------------
 # Web API stub (delivery / zones)
