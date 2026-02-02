@@ -837,7 +837,7 @@ async def render_categories(
         await clear_ui(context, chat_id)
         msg = await context.bot.send_message(
             chat_id=chat_id,
-            text="Каталог временно недоступен (кухня не выбрана).",
+            text="Каталог недоступен (заведение не выбрано). Нажмите /start",
         )
         track_msg(context, msg.message_id)
         return
@@ -849,7 +849,7 @@ async def render_categories(
         await clear_ui(context, chat_id)
         msg = await context.bot.send_message(
             chat_id=chat_id,
-            text="Каталог временно недоступен.",
+            text="Каталог недоступен (заведение не выбрано). Нажмите /start.",
         )
         track_msg(context, msg.message_id)
         return
@@ -861,7 +861,7 @@ async def render_categories(
     if not categories:
         msg = await context.bot.send_message(
             chat_id=chat_id,
-            text="Каталог временно недоступен.",
+            text="Каталог недоступен (заведение не выбрано). Нажмите /start.",
         )
         track_msg(context, msg.message_id)
         return
@@ -2157,6 +2157,13 @@ async def on_staff_eta(update: Update, context: ContextTypes.DEFAULT_TYPE):
         log.error(f"Order {order_id} not found in kitchen {kitchen_id}")
         return
 
+    # ✅ ВАЖНО: гарантированно получаем строку заказа ДО работы с comment
+    if target_idx - 1 >= len(rows):
+        log.error(f"Order row index out of range: idx={target_idx}")
+        return
+
+    order_row = rows[target_idx - 1]
+
     # 6️⃣ Защита от повторного решения
     if current_status in ("courier_requested", "courier_not_requested"):
         await q.answer("Решение по курьеру уже принято", show_alert=True)
@@ -2166,18 +2173,54 @@ async def on_staff_eta(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
         return
 
-    # 7️⃣ Обновление ETA в ПРАВИЛЬНОЙ таблице
-    sheet.values().batchUpdate(
-        spreadsheetId=spreadsheet_id,  # ✅ ИЗ KITCHEN
-        body={
-            "valueInputOption": "RAW",
-            "data": [
-                {"range": f"orders!R{target_idx}", "values": [[pickup_eta_at]]},
-                {"range": f"orders!S{target_idx}", "values": [["preset"]]},
-                {"range": f"orders!T{target_idx}", "values": [["courier_requested"]]},
-            ],
-        },
-    ).execute()
+    # 7️⃣ Обновление ETA + comment в ПРАВИЛЬНОЙ таблице
+    order_row_before = rows[target_idx - 1]
+
+    try:
+        # ✅ НОВОЕ: Формируем обновлённый комментарий
+        # comment = колонка AA (индекс 26)
+        COMMENT_COL_IDX = 26
+
+        existing_comment = (
+            order_row[COMMENT_COL_IDX]
+            if len(order_row) > COMMENT_COL_IDX
+            else ""
+        )
+
+        eta_note = f"Курьер через {minutes} мин"
+
+        # Если комментарий уже есть, добавляем через разделитель
+        if existing_comment and existing_comment.strip():
+            new_comment = f"{existing_comment} | {eta_note}"
+        else:
+            new_comment = eta_note
+
+        log.info(
+            f"[ETA_COMMENT] order={order_id} "
+            f"old='{existing_comment}' new='{new_comment}'"
+        )
+
+        sheet.values().batchUpdate(
+            spreadsheetId=spreadsheet_id,
+            body={
+                "valueInputOption": "RAW",
+                "data": [
+                    {"range": f"orders!R{target_idx}", "values": [[pickup_eta_at]]},
+                    {"range": f"orders!S{target_idx}", "values": [["preset"]]},
+                    {"range": f"orders!T{target_idx}", "values": [["courier_requested"]]},
+                    {"range": f"orders!AA{target_idx}", "values": [[new_comment]]},  # ✅ COMMENT
+                ],
+            },
+        ).execute()
+
+        log.info(
+            f"Order {order_id} updated: pickup_eta_at={pickup_eta_at}, "
+            f"courier_state=courier_requested, comment='{new_comment}'"
+        )
+
+    except Exception:
+            log.exception(f"Failed to update ETA/comment for order {order_id}")
+            return
 
     # 8️⃣ Перечитываем строку
     rows = sheet.values().get(
