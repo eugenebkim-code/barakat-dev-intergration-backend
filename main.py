@@ -95,6 +95,7 @@ from marketplace_handlers import (
     marketplace_callback,
     marketplace_back,
 )
+from types import SimpleNamespace
 from marketplace_handlers import get_active_kitchen
 from kitchen_context import KitchenContext
 from config import (
@@ -108,6 +109,7 @@ from config import (
 HOME_PHOTO_FILE_ID = "AgACAgUAAxkBAAIBWml2tkzPZ3lgBPKTVeeA3Wi9Z3yJAAKuDWsbhLi4VyKeP_hEUISAAQADAgADeQADOAQ"
 import inspect
 import requests
+
 
 WEB_API_URL = os.getenv("WEB_API_URL", "http://127.0.0.1:8000")
 API_KEY = os.getenv("API_KEY", "DEV_KEY")
@@ -3271,8 +3273,32 @@ def get_kitchen_address_cached(
             return r[1]
 
     return None
+# -------------------------
+# WEBAPP
+# -------------------------
+async def on_webapp_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.effective_message.web_app_data:
+        return
 
+    try:
+        data = json.loads(update.effective_message.web_app_data.data)
+    except Exception:
+        return
 
+    if data.get("type") != "webapp_checkout":
+        return
+
+    log.info("🔥 WEBAPP CHECKOUT TRIGGERED")
+
+    await webapp_orders_job(
+        SimpleNamespace(
+            job=SimpleNamespace(
+                data={
+                    "spreadsheet_id": kitchen.spreadsheet_id
+                }
+            )
+        )
+    )
 # -------------------------
 # main/helpers
 # -------------------------
@@ -3782,14 +3808,15 @@ def main():
     app.bot_data["render_home"] = render_home
     from webapp_orders_sync import webapp_orders_job
 
-    #  app.job_queue.run_repeating(
-    #      webapp_orders_job,
-    #      interval=5,
-    #      first=5,
-    #      data={
-    #          "spreadsheet_id": SPREADSHEET_ID,
-    #      },
-    #  )
+    # -------- WebApp --------
+    
+    app.add_handler(
+        MessageHandler(
+            filters.StatusUpdate.WEB_APP_DATA,
+            on_webapp_data
+        )
+    )
+
 
     # -------- Marketplace Handlers --------
     app.add_handler(
