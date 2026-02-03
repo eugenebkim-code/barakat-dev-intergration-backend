@@ -1,4 +1,4 @@
-# main.py — BARAKAT PROD "электронный прилавок"
+# main.py — MarketPlace EASYGO
 # Требования:
 # - Python + python-telegram-bot v20+
 # - без AI/оплаты/админки
@@ -543,6 +543,8 @@ def save_order_to_sheets(
         "",                           # AB platform_commission
         "created",                    # AC commission_status
         "",                           # AD owner_debt_snapshot
+        "",                           # AE seen_by_system
+        "",                           # AF staff_notified
     ]
 
     log.info(
@@ -2120,6 +2122,34 @@ DELIVERY_FEE = 4000
 # webapi - handlers
 # -------------------------
 
+def parse_payment_proof(value: str) -> str | None:
+    """
+    value ожидается вида:
+    upload_xxx
+    или
+    https://...
+    """
+    if not value:
+        return None
+
+    value = str(value).strip()
+
+    if value.startswith("http://") or value.startswith("https://"):
+        return value
+
+    if value.startswith("upload_"):
+        try:
+            import os
+            web_api_url = os.getenv("WEB_API_URL")
+            if not web_api_url:
+                return None
+
+            return f"{web_api_url}/api/v1/uploads/{value}"
+        except Exception:
+            return None
+
+    return None
+
 async def on_staff_eta(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log.info("=== ENTER on_staff_eta ===")
 
@@ -3255,49 +3285,40 @@ def get_kitchen_address_cached(
 # WEBAPP
 # -------------------------
 async def on_webapp_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message:
+    if not update.message or not update.message.web_app_data:
         return
-
-    if not update.message.web_app_data:
-        return
-
-    print("🔥 WEBAPP DATA RECEIVED")
 
     raw_data = update.message.web_app_data.data
-    print("📦 RAW:", raw_data)
+    log.info("📦 WEBAPP RAW DATA: %s", raw_data)
 
     try:
         data = json.loads(raw_data)
-    except Exception as e:
-        print("❌ JSON ERROR", e)
+    except Exception:
+        log.exception("❌ WEBAPP JSON PARSE ERROR")
         return
-
-    print("🧾 TYPE:", data.get("type"))
 
     if data.get("type") != "webapp_checkout":
-        print("❌ WRONG TYPE")
+        log.debug("WEBAPP DATA IGNORED type=%s", data.get("type"))
         return
 
-    print("🔥 WEBAPP CHECKOUT TRIGGERED")
+    order_id = data.get("order_id")
+    kitchen_id = data.get("kitchen_id")
 
-    log.info("🔥 WEBAPP CHECKOUT TRIGGERED")
+    log.critical(
+        "🔥 WEBAPP CHECKOUT RECEIVED order=%s kitchen=%s",
+        order_id,
+        kitchen_id,
+    )
 
-    # lazy import, как у тебя и было
-    from webapp_orders_sync import webapp_orders_job
+    # НИЧЕГО НЕ ДЕРГАЕМ
+    # НИ sync
+    # НИ notify
+    # Sheets = источник истины
 
-    try:
-        await webapp_orders_job(
-            SimpleNamespace(
-                job=SimpleNamespace(
-                    data={
-                        "spreadsheet_id": data.get("kitchen_id")
-                    }
-                )
-            )
-        )
-        log.info("✅ webapp_orders_job finished without exception")
-    except Exception as e:
-        log.error("❌ webapp_orders_job crashed", exc_info=True)
+    await update.message.reply_text(
+        "✅ Заказ принят и передан кухне.\n"
+        "Мы уже уведомляем персонал ⏳"
+    )
 # -------------------------
 # main/helpers
 # -------------------------
@@ -3597,44 +3618,47 @@ async def render_catalog_products(
         )
         track_msg(context, m.message_id)
 
-async def notify_staff(bot, kitchen_or_order_id, maybe_order_id: str | None = None):
+async def notify_staff(bot, kitchen, order_id: str):
     log.error("🔥🔥🔥 notify_staff CALLED")
 
-    # поддержка двух вариантов вызова:
-    # 1) notify_staff(bot, order_id)
-    # 2) notify_staff(bot, kitchen, order_id)
-    if maybe_order_id is None:
-        kitchen = None
-        order_id = str(kitchen_or_order_id)
-    else:
-        kitchen = kitchen_or_order_id
-        order_id = str(maybe_order_id)
+    # --- защита ---
+    if kitchen is None:
+        log.error("notify_staff called without kitchen")
+        return None
 
-    # локальный список получателей: если передали kitchen, шлем только ему
-    staff_chat_ids = None
-    if kitchen is not None:
-        staff_chat_ids = getattr(kitchen, "staff_chat_ids", None)
-        owner_chat_id = getattr(kitchen, "owner_chat_id", None)
-        try:
-            staff_chat_ids = set(staff_chat_ids or [])
-        except Exception:
-            staff_chat_ids = set()
-        if owner_chat_id:
-            staff_chat_ids.add(owner_chat_id)
-    else:
-        staff_chat_ids = set(STAFF_CHAT_IDS)
+    order_id = str(order_id)
 
+    # --- получатели ---
+    staff_chat_ids = set()
+
+    try:
+        if getattr(kitchen, "staff_chat_ids", None):
+            staff_chat_ids.update(kitchen.staff_chat_ids)
+    except Exception:
+        pass
+
+    owner_chat_id = getattr(kitchen, "owner_chat_id", None)
+    if owner_chat_id:
+        staff_chat_ids.add(owner_chat_id)
+
+    if not staff_chat_ids:
+        log.warning(f"no staff recipients for kitchen={kitchen.id}")
+        return None
+
+    # --- sheets ---
+    spreadsheet_id = kitchen.spreadsheet_id
     service = get_sheets_service()
-    spreadsheet_id = (
-        kitchen.spreadsheet_id
-        if kitchen is not None
-        else SPREADSHEET_ID
-    )
 
-    rows = service.spreadsheets().values().get(
-    spreadsheetId=spreadsheet_id,
-    range=ORDERS_RANGE,
-).execute().get("values", [])
+    rows = (
+        service.spreadsheets()
+        .values()
+        .get(
+            spreadsheetId=spreadsheet_id,
+            range=ORDERS_RANGE,
+        )
+        .execute()
+        .get("values", [])
+    )
 
     if len(rows) < 2:
         return None
@@ -3648,10 +3672,11 @@ async def notify_staff(bot, kitchen_or_order_id, maybe_order_id: str | None = No
     if not order_row:
         log.warning(f"order {order_id} not found")
         return None
-    
+
+    # --- парс заказа ---
     order_id        = order_row[0]
-    created_at      = order_row[1]
-    buyer_chat_id   = order_row[2]
+    created_at      = order_row[1] if len(order_row) > 1 else ""
+    buyer_chat_id   = order_row[2] if len(order_row) > 2 else ""
     items           = order_row[4] if len(order_row) > 4 else ""
     total           = int(order_row[5]) if len(order_row) > 5 and str(order_row[5]).isdigit() else 0
     kind            = order_row[6] if len(order_row) > 6 else ""
@@ -3661,18 +3686,24 @@ async def notify_staff(bot, kitchen_or_order_id, maybe_order_id: str | None = No
 
     address         = order_row[13] if len(order_row) > 13 else ""
     delivery_fee    = int(order_row[14]) if len(order_row) > 14 and str(order_row[14]).isdigit() else 0
-        
+
     if status not in ("pending", "created"):
         return None
 
+    # --- покупатель ---
     buyer_name = ""
     buyer_phone = ""
 
-    service = get_sheets_service()
-    users = service.spreadsheets().values().get(
-        spreadsheetId=spreadsheet_id,
-        range="users!A:F",
-    ).execute().get("values", [])
+    users = (
+        service.spreadsheets()
+        .values()
+        .get(
+            spreadsheetId=spreadsheet_id,
+            range="users!A:F",
+        )
+        .execute()
+        .get("values", [])
+    )
 
     for u in users:
         if u and u[0] == buyer_chat_id:
@@ -3680,7 +3711,12 @@ async def notify_staff(bot, kitchen_or_order_id, maybe_order_id: str | None = No
             buyer_phone = u[5] if len(u) > 5 else ""
             break
 
-    address_block = f"\n📍 <b>Адрес:</b>\n<code>{address}</code>\n" if address else ""
+    # --- текст ---
+    address_block = (
+        f"\n📍 <b>Адрес:</b>\n<code>{address}</code>\n"
+        if address
+        else ""
+    )
 
     delivery_line = ""
     if kind == "Доставка":
@@ -3691,8 +3727,7 @@ async def notify_staff(bot, kitchen_or_order_id, maybe_order_id: str | None = No
         )
 
     caption = (
-        "🧨 TEST_NOTIFY_STAFF\n\n"
-        "🛎 <b>Новый заказ</b>\n\n"
+        "🧨 У ВАС НОВЫЙ ЗАКАЗ!\n\n"
         f"🧾 ID: <code>{order_id}</code>\n\n"
         f"👤 <b>Имя:</b> {buyer_name or '—'}\n"
         f"📞 <b>Телефон:</b> <code>{buyer_phone or '—'}</code>\n"
@@ -3704,14 +3739,17 @@ async def notify_staff(bot, kitchen_or_order_id, maybe_order_id: str | None = No
         f"💬 Комментарий: <b>{comment or '—'}</b>"
     )
 
+    # --- отправка ---
     first_msg = None
 
     for staff_id in staff_chat_ids:
         try:
-            if payment_file_id:
+            proof_url = parse_payment_proof(payment_file_id)
+
+            if proof_url:
                 msg = await bot.send_photo(
                     chat_id=staff_id,
-                    photo=payment_file_id,
+                    photo=proof_url,
                     caption=caption,
                     parse_mode="HTML",
                     reply_markup=kb_staff_order(order_id),
@@ -3807,23 +3845,45 @@ def main():
     # 🔗 пробрасываем render_home в marketplace
     app.bot_data["render_home"] = render_home
 
-    from webapp_orders_sync import webapp_orders_job
-
     log.info("### BOT STARTED ###")
-
-    # ===== WEBAPP ORDERS SYNC =====
-    app.job_queue.run_repeating(
-        webapp_orders_job,
-        interval=10,      # каждые 10 секунд
-        first=5,          # первый запуск через 5 секунд
-        data={
-            "spreadsheet_id": SPREADSHEET_ID,
-        },
-        name="webapp_orders_sync",
-    )
-
-
     # -------- Marketplace Handlers --------
+
+    from kitchen_context import list_kitchens, get, load_registry
+    from webapp_orders_sync import orders_job  # ✅ ОДНА job
+
+    log.info("### REGISTERING ORDERS JOBS FOR ALL KITCHENS ###")
+
+    load_registry()
+    all_kitchen_ids = list_kitchens()
+
+    for kitchen_id in all_kitchen_ids:
+        try:
+            kitchen = get(kitchen_id)
+            if not kitchen or kitchen.status != "active":
+                log.warning(f"Skip inactive kitchen: {kitchen_id}")
+                continue
+            
+            # ===== ОДНА JOB: orders_job (sync + notify) =====
+            app.job_queue.run_repeating(
+                orders_job,
+                interval=5,
+                first=1,
+                data={
+                    "spreadsheet_id": kitchen.spreadsheet_id,
+                    "kitchen_id": kitchen_id,
+                },
+                name=f"orders:{kitchen_id}",
+            )
+            
+            log.info(f"✅ Registered orders job for {kitchen_id}")
+            
+        except Exception as e:
+            log.error(f"❌ Failed to register job for {kitchen_id}: {e}")
+
+    log.info("### ORDERS JOBS REGISTRATION COMPLETE ###")
+
+
+   # -------- Marketplace Handlers --------
     app.add_handler(
         CallbackQueryHandler(
             marketplace_back,
@@ -3950,22 +4010,5 @@ def get_categories_from_products(products: list[dict]) -> list[str]:
         for p in products
         if p["available"] and p.get("category")
     })
-
-
-# -------------------------
-# Web API stub (delivery / zones)
-# -------------------------
-
-def webapi_calculate_delivery(cart: dict, address: str) -> dict:
-    """
-    Заглушка расчета доставки.
-    Временно: фиксированная доставка 4000.
-    """
-    return {
-        "ok": True,
-        "price": 4000,
-        "flag": "ok",  # ok | manual | too_far
-    }
-
 if __name__ == "__main__":
     main()

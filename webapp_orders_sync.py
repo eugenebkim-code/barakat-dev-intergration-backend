@@ -1,72 +1,115 @@
-#webapp_orders_sync.py
+# webapp_orders_sync.py - ФИНАЛЬНАЯ ВЕРСИЯ
 
-import sys
-from pathlib import Path
 from datetime import datetime
-from config import (
-    BOT_TOKEN,
-    OWNER_CHAT_ID_INT,
-    ADMIN_CHAT_ID_INT,
-    STAFF_CHAT_IDS,
-    SPREADSHEET_ID,
-    ORDERS_RANGE,   # 👈 ВОТ ЭТО ДОБАВЛЯЕМ
-)
-
-WEB_API_PATH = Path(__file__).resolve().parents[1] / "raduga_demo_web_api"
-sys.path.append(str(WEB_API_PATH))
-
 import logging
+
+from config import ORDERS_RANGE
 from sheets_repo import get_sheets_service
-from main import get_order_from_sheet
+from kitchen_context import require
 
 log = logging.getLogger("WEBAPP_SYNC")
 
-async def webapp_orders_job(context):
-    spreadsheet_id = context.job.data["spreadsheet_id"]
+# Извлекаем имя листа из ORDERS_RANGE
+ORDERS_SHEET = ORDERS_RANGE.split("!")[0]
 
+
+async def orders_job(context):
+    """
+    ОБЪЕДИНЕННАЯ job: sync + notify.
+    
+    Логика:
+    1. Читает Google Sheets
+    2. Для каждой строки:
+       - Если AE пусто → пишет "1"
+       - Если AE="1" и AF пусто → вызывает notify_staff() и пишет AF
+    """
+    job = context.job
+    data = job.data
+
+    spreadsheet_id = data["spreadsheet_id"]
+    kitchen_id = data["kitchen_id"]
+
+    try:
+        kitchen = require(kitchen_id)
+    except Exception as e:
+        log.error(f"[{kitchen_id}] Kitchen not found: {e}")
+        return
+
+    bot = context.bot
     service = get_sheets_service()
-    sheet = service.spreadsheets()
 
-    rows = (
-        sheet.values()
-        .get(
+    try:
+        rows = service.spreadsheets().values().get(
             spreadsheetId=spreadsheet_id,
             range=ORDERS_RANGE,
-        )
-        .execute()
-        .get("values", [])
-    )
+        ).execute().get("values", [])
+    except Exception as e:
+        log.error(f"[{kitchen_id}] Failed to read sheets: {e}")
+        return
 
     if len(rows) < 2:
         return
 
+    sync_updates = []
+    notify_updates = []
+
     for idx, row in enumerate(rows[1:], start=2):
-        order_id = row[0] if len(row) > 0 else ""
-        status = row[9] if len(row) > 9 else ""
-        source = row[15] if len(row) > 15 else ""
-        staff_notified = row[16] if len(row) > 16 else ""
+        order_id = row[0] if row else f"row_{idx}"
+        
+        # Колонка AE = index 30
+        ae = row[30] if len(row) > 30 else ""
+        
+        # Колонка AF = index 31
+        af = row[31] if len(row) > 31 else ""
 
-        if not order_id:
-            continue
+        # ===== SYNC: Если AE пусто → записываем "1" =====
+        if not ae:
+            sync_updates.append({
+                "range": f"{ORDERS_SHEET}!AE{idx}",
+                "values": [["1"]],
+            })
+            log.info(f"[{kitchen_id}] SYNC: order={order_id} row={idx} -> AE=1")
+            continue  # пропускаем notify для этой строки (AE только что записали)
 
-        if status != "created" or source not in ("kitchen", "webapp") or staff_notified:
-            log.info(
-                f"SKIP order={order_id} status={status} source={source} staff_notified={staff_notified}"
-            )
-            continue
+        # ===== NOTIFY: Если AE="1" и AF пусто → notify =====
+        if ae == "1" and not af:
+            log.info(f"[{kitchen_id}] NOTIFY: order={order_id} row={idx}")
 
-        log.info(f"📦 WEBAPP ORDER DETECTED {order_id} row={idx}")
+            try:
+                from main import notify_staff
 
+                await notify_staff(bot, kitchen, order_id)
+
+                notify_updates.append({
+                    "range": f"{ORDERS_SHEET}!AF{idx}",
+                    "values": [[f"notified:{datetime.utcnow().isoformat()}"]],
+                })
+                
+                log.info(f"[{kitchen_id}] NOTIFY: order={order_id} -> AF=notified")
+
+            except ImportError as e:
+                log.error(f"[{kitchen_id}] Failed to import notify_staff: {e}")
+                
+            except Exception as e:
+                log.error(f"[{kitchen_id}] notify_staff failed for {order_id}: {e}", exc_info=True)
+
+    # ===== Батч-апдейты =====
+    all_updates = sync_updates + notify_updates
+
+    if all_updates:
         try:
-            sheet.values().update(
+            service.spreadsheets().values().batchUpdate(
                 spreadsheetId=spreadsheet_id,
-                range=f"Q{idx}",
-                valueInputOption="RAW",
-                body={"values": [[f"seen:{datetime.utcnow().isoformat()}"]]},
+                body={
+                    "valueInputOption": "RAW",
+                    "data": all_updates,
+                },
             ).execute()
-
-            log.info(f"✅ WEBAPP order {order_id} marked as seen (Q{idx})")
-
-        except Exception:
-            log.exception(f"❌ Failed to mark WEBAPP order {order_id} as seen")
-            continue
+            
+            if sync_updates:
+                log.info(f"[{kitchen_id}] Wrote {len(sync_updates)} AE updates")
+            if notify_updates:
+                log.info(f"[{kitchen_id}] Wrote {len(notify_updates)} AF updates")
+                
+        except Exception as e:
+            log.error(f"[{kitchen_id}] Failed to write updates: {e}")

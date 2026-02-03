@@ -7,7 +7,7 @@ ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
 OWNER_CHAT_ID = os.getenv("OWNER_CHAT_ID")
 SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
 
-ORDERS_RANGE = "orders!A:AD"
+ORDERS_RANGE = "orders!A:AF"
 
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN is not set")
