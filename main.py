@@ -109,39 +109,43 @@ from config import (
 HOME_PHOTO_FILE_ID = "AgACAgUAAxkBAAIBWml2tkzPZ3lgBPKTVeeA3Wi9Z3yJAAKuDWsbhLi4VyKeP_hEUISAAQADAgADeQADOAQ"
 import inspect
 import requests
+from config import WEB_API_BASE_URL, WEB_API_KEY, WEB_API_TIMEOUT
 
-
-WEB_API_URL = os.getenv("WEB_API_URL", "http://127.0.0.1:8000")
-API_KEY = os.getenv("API_KEY", "DEV_KEY")
-WEB_API_TIMEOUT = 5
+logger = logging.getLogger(__name__)
 
 def webapi_check_address(city: str, address: str) -> dict | None:
     try:
-        API_KEY = os.getenv("API_KEY") or "DEV_KEY"
-        logger.error(f"[COURIER_API] using X-API-KEY={API_KEY!r}")
+        logger.info(
+            "[WEBAPI] address check city=%r address=%r url=%s",
+            city,
+            address,
+            WEB_API_BASE_URL,
+        )
 
         resp = requests.post(
-            f"{WEB_API_URL}/api/v1/address/check",
+            f"{WEB_API_BASE_URL}/api/v1/address/check",
             json={
                 "city": city,
                 "address": address,
             },
             headers={
-                "X-API-KEY": API_KEY,
+                "X-API-KEY": WEB_API_KEY,
             },
             timeout=WEB_API_TIMEOUT,
         )
 
         if resp.status_code != 200:
             logger.error(
-                f"WEBAPI address check failed: {resp.status_code} {resp.text}"
+                "[WEBAPI] address check failed %s %s",
+                resp.status_code,
+                resp.text,
             )
             return None
 
         return resp.json()
 
     except Exception as e:
-        logger.exception(f"WEBAPI address check exception: {e}")
+        logger.exception("[WEBAPI] address check exception: %s", e)
         return None
     
 # -------------------------
@@ -1262,13 +1266,35 @@ async def on_checkout_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         checkout["address"] = check.get("normalized_address", text)
-        checkout["delivery_price_krw"] = check.get("price_krw", 0)
-        checkout["distance_km"] = check.get("distance_km")
-        context.user_data["address_verified"] = True
 
-        price_krw = check.get("price_krw", 0)
+        # КРИТИЧНО: получаем delivery_price из Web API
+        # Если цена не пришла — флоу ДОЛЖЕН остановиться
+        delivery_price = check.get("delivery_price")
+
+        if delivery_price is None:
+            log.error(
+                "[CHECKOUT] Web API did NOT return delivery_price! "
+                f"address={text!r} check={check!r}"
+            )
+            await msg.reply_text(
+                "❌ Ошибка расчета доставки\n\n"
+                "Не удалось определить стоимость. "
+                "Попробуйте изменить адрес или свяжитесь с поддержкой."
+            )
+            return
+
+        checkout["delivery_price_krw"] = int(delivery_price)
+        checkout["distance_km"] = check.get("distance_km")
+
         distance_km = check.get("distance_km", 0)
-        
+
+        log.info(
+            "[DELIVERY_PRICE_RESOLVED] "
+            f"address={text!r} "
+            f"price={checkout['delivery_price_krw']} "
+            f"distance_km={distance_km}"
+        )
+
         # Если вне зоны — спрашиваем подтверждение
         if distance_km and distance_km > 4.0:
             checkout["step"] = "confirm_price"
@@ -1277,7 +1303,7 @@ async def on_checkout_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"📍 Адрес подтверждён\n\n"
                 f"⚠️ Адрес вне стандартной зоны доставки\n"
                 f"📏 Расстояние: {distance_km} км\n"
-                f"🚚 Стоимость доставки: {price_krw:,}₩\n\n"
+                f"🚚 Стоимость доставки: {checkout['delivery_price_krw']:,}₩\n\n"  # ← ИСПРАВЛЕНО
                 f"Продолжить оформление?",
                 reply_markup=InlineKeyboardMarkup([
                     [
@@ -1444,8 +1470,11 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
             # защита: доставка без verified адреса невозможна
         if checkout.get("type") == "delivery":
-            if context.user_data.get("address_verified") is not True:
-                log.warning("⛔ final_send blocked: address not verified")
+            if not checkout.get("address") or checkout.get("delivery_price_krw") is None:
+                log.warning(
+                    "⛔ final_send blocked: delivery data incomplete | checkout=%s",
+                    checkout,
+                )
                 await context.bot.send_message(
                     chat_id=chat_id,
                     text="❌ Адрес доставки не подтвержден. Повторите ввод адреса.",
@@ -2500,34 +2529,11 @@ async def courier_cancel_order(external_id: str) -> dict:
 # Web API client (kitchen -> webapi)
 # =========================
 
-import os
-import httpx
-import logging
-
-log = logging.getLogger("WEBAPI_CLIENT")
-
-WEB_API_URL = os.getenv("WEB_API_URL", "http://127.0.0.1:8000")
-WEB_API_KEY = os.getenv("WEB_API_KEY", os.getenv("API_KEY", "DEV_KEY"))
-
-
-import json
-import httpx
-import logging
-
-log = logging.getLogger("WEBAPI_CLIENT")
-
 async def create_webapi_order(payload: dict) -> dict:
-    """
-    Kitchen registers order in Web API (idempotent).
-    Does NOT break kitchen flow if Web API is down (caller handles exceptions).
-    """
-    url = f"{WEB_API_URL}/api/v1/orders"
+    url = f"{WEB_API_BASE_URL}/api/v1/orders"
 
-    # полезно для трассировки и идемпотентности на стороне Web API
     order_id = payload.get("order_id")
     kitchen_id = payload.get("kitchen_id")
-
-    timeout = httpx.Timeout(connect=5.0, read=10.0, write=10.0, pool=5.0)
 
     headers = {
         "X-API-KEY": WEB_API_KEY,
@@ -2536,55 +2542,27 @@ async def create_webapi_order(payload: dict) -> dict:
     if order_id:
         headers["X-IDEMPOTENCY-KEY"] = str(order_id)
 
-    try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            resp = await client.post(url, json=payload, headers=headers)
+    timeout = httpx.Timeout(connect=5.0, read=10.0, write=10.0, pool=5.0)
 
-    except httpx.TimeoutException as e:
-        log.warning(
-            "[create_webapi_order] timeout | order_id=%r kitchen_id=%r url=%s err=%s",
-            order_id,
-            kitchen_id,
-            url,
-            repr(e),
-        )
-        raise
+    log.info(
+        "[WEBAPI] create order order_id=%r kitchen_id=%r url=%s",
+        order_id,
+        kitchen_id,
+        url,
+    )
 
-    except httpx.RequestError as e:
-        log.warning(
-            "[create_webapi_order] request error | order_id=%r kitchen_id=%r url=%s err=%s",
-            order_id,
-            kitchen_id,
-            url,
-            repr(e),
-        )
-        raise
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.post(url, json=payload, headers=headers)
 
     if resp.status_code != 200:
-        body_preview = (resp.text or "")[:500]
-        log.warning(
-            "[create_webapi_order] bad status | %s | order_id=%r kitchen_id=%r body=%r",
+        log.error(
+            "[WEBAPI] create order failed %s %s",
             resp.status_code,
-            order_id,
-            kitchen_id,
-            body_preview,
+            resp.text,
         )
-        raise RuntimeError(
-            f"WebAPI create_order failed {resp.status_code}: {body_preview}"
-        )
+        raise RuntimeError("WEB API order create failed")
 
-    # иногда сервер может вернуть не-json (например html 502 прокси)
-    try:
-        return resp.json()
-    except json.JSONDecodeError:
-        body_preview = (resp.text or "")[:500]
-        log.warning(
-            "[create_webapi_order] non-json response | order_id=%r kitchen_id=%r body=%r",
-            order_id,
-            kitchen_id,
-            body_preview,
-        )
-        raise RuntimeError(f"WebAPI create_order returned non-json: {body_preview}")
+    return resp.json()
 
 from datetime import datetime, timezone
 async def send_to_courier_and_persist(
@@ -3277,28 +3255,49 @@ def get_kitchen_address_cached(
 # WEBAPP
 # -------------------------
 async def on_webapp_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.effective_message.web_app_data:
+    if not update.message:
         return
+
+    if not update.message.web_app_data:
+        return
+
+    print("🔥 WEBAPP DATA RECEIVED")
+
+    raw_data = update.message.web_app_data.data
+    print("📦 RAW:", raw_data)
 
     try:
-        data = json.loads(update.effective_message.web_app_data.data)
-    except Exception:
+        data = json.loads(raw_data)
+    except Exception as e:
+        print("❌ JSON ERROR", e)
         return
 
+    print("🧾 TYPE:", data.get("type"))
+
     if data.get("type") != "webapp_checkout":
+        print("❌ WRONG TYPE")
         return
+
+    print("🔥 WEBAPP CHECKOUT TRIGGERED")
 
     log.info("🔥 WEBAPP CHECKOUT TRIGGERED")
 
-    await webapp_orders_job(
-        SimpleNamespace(
-            job=SimpleNamespace(
-                data={
-                    "spreadsheet_id": kitchen.spreadsheet_id
-                }
+    # lazy import, как у тебя и было
+    from webapp_orders_sync import webapp_orders_job
+
+    try:
+        await webapp_orders_job(
+            SimpleNamespace(
+                job=SimpleNamespace(
+                    data={
+                        "spreadsheet_id": data.get("kitchen_id")
+                    }
+                )
             )
         )
-    )
+        log.info("✅ webapp_orders_job finished without exception")
+    except Exception as e:
+        log.error("❌ webapp_orders_job crashed", exc_info=True)
 # -------------------------
 # main/helpers
 # -------------------------
@@ -3804,17 +3803,23 @@ def build_checkout_preview(
 
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
+
     # 🔗 пробрасываем render_home в marketplace
     app.bot_data["render_home"] = render_home
+
     from webapp_orders_sync import webapp_orders_job
 
-    # -------- WebApp --------
-    
-    app.add_handler(
-        MessageHandler(
-            filters.StatusUpdate.WEB_APP_DATA,
-            on_webapp_data
-        )
+    log.info("### BOT STARTED ###")
+
+    # ===== WEBAPP ORDERS SYNC =====
+    app.job_queue.run_repeating(
+        webapp_orders_job,
+        interval=10,      # каждые 10 секунд
+        first=5,          # первый запуск через 5 секунд
+        data={
+            "spreadsheet_id": SPREADSHEET_ID,
+        },
+        name="webapp_orders_sync",
     )
 
 
@@ -3927,29 +3932,12 @@ def main():
         spreadsheet_id=SPREADSHEET_ID,
     )
 
-    log.info("Bot started")
-    app.run_polling(
-        allowed_updates=[
-            "message",
-            "callback_query",
-            "web_app_data",
-        ],
-        drop_pending_updates=True,
-    )
-
-    
+    log.info("### START POLLING ###")
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
+        
 # -------- BUYER PHOTO (payment proof) --------
+print("### MAIN FILE REACHED END ###")
     
-    log.info("Bot started")
-    app.run_polling(
-        allowed_updates=[
-            "message",
-            "callback_query",
-            "web_app_data",
-        ],
-        drop_pending_updates=True,
-    )
-
 def get_product_by_id(product_id: str, kitchen):
     for p in read_products_from_sheets(kitchen):
         if p["product_id"] == product_id:

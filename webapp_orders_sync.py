@@ -36,18 +36,30 @@ async def webapp_orders_job(context):
         return
 
     for idx, row in enumerate(rows[1:], start=2):
+        order_id = row[0] if len(row) > 0 else ""
         status = row[9] if len(row) > 9 else ""
         staff_notified = row[16] if len(row) > 16 else ""
 
-        if status != "pending" or staff_notified:
-            log.info(
-                f"CHECK order={row[0]} status={status} staff_notified={staff_notified}"
-            )
+        # Мы ловим только новые webapp-заказы (status=created) и только если еще не помечены
+        if status != "created" or staff_notified:
+            # чтобы не спамить логами каждые 10 сек по всем строкам
             continue
 
-        order_id = row[0]
-        log.info(f"📦 WEBAPP ORDER DETECTED {order_id}")
-        # WebApp уже уведомляет стаф напрямую.
-        # Здесь мы только фиксируем, что заказ замечен job'ом.
-        log.info(f"✅ WEBAPP order {order_id} marked as seen by sync job")
+        log.info(f"📦 WEBAPP ORDER DETECTED {order_id} row={idx}")
+
+        # Помечаем, что заказ увиден job'ом, чтобы не обрабатывать его снова
+        # (колонка Q = staff_message_id, индекс 16)
+        try:
+            sheet.values().update(
+                spreadsheetId=spreadsheet_id,
+                range=f"Q{idx}",
+                valueInputOption="RAW",
+                body={"values": [[f"seen:{datetime.utcnow().isoformat()}"]]},
+            ).execute()
+
+            log.info(f"✅ WEBAPP order {order_id} marked as seen (Q{idx})")
+
+        except Exception:
+            log.exception(f"❌ Failed to mark WEBAPP order {order_id} as seen")
+            continue
             

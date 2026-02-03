@@ -60,42 +60,43 @@ async def webapi_create_order(payload: dict) -> dict:
 
 
 async def webapi_check_address(payload: dict) -> dict:
-    """
-    Проверка адреса через Web API.
-    Safe: не бросает исключения наружу.
-    """
-
-    # DEV / fallback режим
-    if not WEB_API_URL:
-        log.warning("WEB_API_URL not set, using stub check_address")
-        return {
-            "ok": True,
-            "normalized_address": payload.get("address", "").strip(),
-            "zone": "STUB_ZONE",
-            "message": "Адрес проверен (stub)",
-        }
-
-    try:
-        async with httpx.AsyncClient(timeout=WEB_API_TIMEOUT) as client:
-            resp = await client.post(
-                f"{WEB_API_URL}/api/v1/address/check",
-                json=payload,
-                headers={
-                    "X-API-KEY": API_KEY,
-                    "X-ROLE": "kitchen",
-                },
-            )
-
-        if resp.status_code != 200:
+    # ... existing code до result = resp.json() ...
+    
+    result = resp.json()
+    
+    # ✅ ВАЛИДАЦИЯ КОНТРАКТА API
+    if result.get("ok") is True:
+        if "delivery_price" not in result:
             log.error(
-                "WEBAPI check_address failed | status=%s body=%s",
-                resp.status_code,
-                resp.text,
+                "[WEBAPI CONTRACT VIOLATION] "
+                "Web API returned ok=true but NO delivery_price! "
+                f"payload={payload} response={result}"
             )
-            return {"ok": False, "message": "http_error"}
-
-        return resp.json()
-
-    except Exception as e:
-        log.exception("WEBAPI check_address exception")
-        return {"ok": False, "message": "exception"}
+            return {
+                "ok": False,
+                "message": "API contract violation: missing delivery_price"
+            }
+        
+        # Проверка корректности значения
+        try:
+            price = float(result["delivery_price"])
+            if price < 0:
+                log.error(
+                    "[WEBAPI CONTRACT VIOLATION] "
+                    f"Negative delivery_price={price}!"
+                )
+                return {
+                    "ok": False,
+                    "message": "API contract violation: negative price"
+                }
+        except (TypeError, ValueError):
+            log.error(
+                "[WEBAPI CONTRACT VIOLATION] "
+                f"Invalid delivery_price format: {result.get('delivery_price')!r}"
+            )
+            return {
+                "ok": False,
+                "message": "API contract violation: invalid price format"
+            }
+    
+    return result
