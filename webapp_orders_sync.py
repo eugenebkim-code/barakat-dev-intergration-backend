@@ -27,10 +27,15 @@ async def webapp_orders_job(context):
     service = get_sheets_service()
     sheet = service.spreadsheets()
 
-    rows = sheet.values().get(
-        spreadsheetId=spreadsheet_id,
-        range=ORDERS_RANGE,
-    ).execute().get("values", [])
+    rows = (
+        sheet.values()
+        .get(
+            spreadsheetId=spreadsheet_id,
+            range=ORDERS_RANGE,
+        )
+        .execute()
+        .get("values", [])
+    )
 
     if len(rows) < 2:
         return
@@ -38,17 +43,20 @@ async def webapp_orders_job(context):
     for idx, row in enumerate(rows[1:], start=2):
         order_id = row[0] if len(row) > 0 else ""
         status = row[9] if len(row) > 9 else ""
+        source = row[15] if len(row) > 15 else ""
         staff_notified = row[16] if len(row) > 16 else ""
 
-        # Мы ловим только новые webapp-заказы (status=created) и только если еще не помечены
-        if status != "created" or staff_notified:
-            # чтобы не спамить логами каждые 10 сек по всем строкам
+        if not order_id:
+            continue
+
+        if status != "created" or source not in ("kitchen", "webapp") or staff_notified:
+            log.info(
+                f"SKIP order={order_id} status={status} source={source} staff_notified={staff_notified}"
+            )
             continue
 
         log.info(f"📦 WEBAPP ORDER DETECTED {order_id} row={idx}")
 
-        # Помечаем, что заказ увиден job'ом, чтобы не обрабатывать его снова
-        # (колонка Q = staff_message_id, индекс 16)
         try:
             sheet.values().update(
                 spreadsheetId=spreadsheet_id,
@@ -62,4 +70,3 @@ async def webapp_orders_job(context):
         except Exception:
             log.exception(f"❌ Failed to mark WEBAPP order {order_id} as seen")
             continue
-            
