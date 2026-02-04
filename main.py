@@ -2289,18 +2289,6 @@ async def on_staff_eta(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
 
-    chat_id = q.message.chat_id
-    allowed_chat_ids = set()
-
-    if kitchen.owner_chat_id:
-        allowed_chat_ids.add(kitchen.owner_chat_id)
-
-    if kitchen.staff_chat_ids:
-        allowed_chat_ids.update(kitchen.staff_chat_ids)
-
-    if chat_id not in allowed_chat_ids:
-        return
-
     # 1️⃣ Парсинг callback: staff:eta:10:kitchen_2:ORDER_123
     parts = q.data.split(":")
     if len(parts) != 5:
@@ -2330,6 +2318,22 @@ async def on_staff_eta(update: Update, context: ContextTypes.DEFAULT_TYPE):
     spreadsheet_id = kitchen.spreadsheet_id
     log.info(f"Kitchen resolved: spreadsheet_id={spreadsheet_id}")
     
+    # 🔐 Проверка прав: кто нажал кнопку ETA
+    chat_id = q.message.chat_id
+    allowed_chat_ids = set()
+
+    if kitchen.owner_chat_id:
+        allowed_chat_ids.add(kitchen.owner_chat_id)
+
+    if kitchen.staff_chat_ids:
+        allowed_chat_ids.update(kitchen.staff_chat_ids)
+
+    if chat_id not in allowed_chat_ids:
+        log.warning(
+            f"ETA denied: chat_id={chat_id} not allowed for kitchen={kitchen_id}"
+        )
+        return
+
     # 3️⃣ Подключение к Sheets
     service = get_sheets_service()
     sheet = service.spreadsheets()
