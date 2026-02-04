@@ -1936,7 +1936,21 @@ async def on_staff_decision(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.answer()
     chat_id = q.message.chat_id
 
-    if chat_id not in STAFF_CHAT_IDS:
+    from kitchen_context import _REGISTRY
+
+    kitchen = _REGISTRY.get(kitchen_id)
+    if not kitchen:
+        return
+
+    allowed_chat_ids = set()
+
+    if kitchen.owner_chat_id:
+        allowed_chat_ids.add(kitchen.owner_chat_id)
+
+    if kitchen.staff_chat_ids:
+        allowed_chat_ids.update(kitchen.staff_chat_ids)
+
+    if chat_id not in allowed_chat_ids:
         return
 
     data = q.data or ""
@@ -2152,7 +2166,21 @@ async def on_catalog_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = q.message.chat_id
     data = q.data or ""
 
-    if chat_id not in STAFF_CHAT_IDS:
+    from kitchen_context import _REGISTRY
+
+    kitchen = _REGISTRY.get(kitchen_id)
+    if not kitchen:
+        return
+
+    allowed_chat_ids = set()
+
+    if kitchen.owner_chat_id:
+        allowed_chat_ids.add(kitchen.owner_chat_id)
+
+    if kitchen.staff_chat_ids:
+        allowed_chat_ids.update(kitchen.staff_chat_ids)
+
+    if chat_id not in allowed_chat_ids:
         return
 
     # --- NAV внутри staff-каталога ---
@@ -2262,7 +2290,21 @@ async def on_staff_eta(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.answer()
 
     chat_id = q.message.chat_id
-    if chat_id not in STAFF_CHAT_IDS:
+    from kitchen_context import _REGISTRY
+
+    kitchen = _REGISTRY.get(kitchen_id)
+    if not kitchen:
+        return
+
+    allowed_chat_ids = set()
+
+    if kitchen.owner_chat_id:
+        allowed_chat_ids.add(kitchen.owner_chat_id)
+
+    if kitchen.staff_chat_ids:
+        allowed_chat_ids.update(kitchen.staff_chat_ids)
+
+    if chat_id not in allowed_chat_ids:
         return
 
     # 1️⃣ Парсинг callback: staff:eta:10:kitchen_2:ORDER_123
@@ -2443,7 +2485,21 @@ async def on_staff_no_courier(update: Update, context: ContextTypes.DEFAULT_TYPE
     await q.answer()
 
     chat_id = q.message.chat_id
-    if chat_id not in STAFF_CHAT_IDS:
+    from kitchen_context import _REGISTRY
+
+    kitchen = _REGISTRY.get(kitchen_id)
+    if not kitchen:
+        return
+
+    allowed_chat_ids = set()
+
+    if kitchen.owner_chat_id:
+        allowed_chat_ids.add(kitchen.owner_chat_id)
+
+    if kitchen.staff_chat_ids:
+        allowed_chat_ids.update(kitchen.staff_chat_ids)
+
+    if chat_id not in allowed_chat_ids:
         return
 
     # kitchen + spreadsheet (важно для мульти-кухонь)
@@ -2573,7 +2629,21 @@ async def on_staff_eta_manual_click(update: Update, context: ContextTypes.DEFAUL
     await q.answer()
 
     chat_id = q.message.chat_id
-    if chat_id not in STAFF_CHAT_IDS:
+    from kitchen_context import _REGISTRY
+
+    kitchen = _REGISTRY.get(kitchen_id)
+    if not kitchen:
+        return
+
+    allowed_chat_ids = set()
+
+    if kitchen.owner_chat_id:
+        allowed_chat_ids.add(kitchen.owner_chat_id)
+
+    if kitchen.staff_chat_ids:
+        allowed_chat_ids.update(kitchen.staff_chat_ids)
+
+    if chat_id not in allowed_chat_ids:
         return
 
     _, _, order_id = q.data.split(":", 2)
@@ -2884,7 +2954,21 @@ async def on_staff_courier_retry(update: Update, context: ContextTypes.DEFAULT_T
     await q.answer()
 
     chat_id = q.message.chat_id
-    if chat_id not in STAFF_CHAT_IDS:
+    from kitchen_context import _REGISTRY
+
+    kitchen = _REGISTRY.get(kitchen_id)
+    if not kitchen:
+        return
+
+    allowed_chat_ids = set()
+
+    if kitchen.owner_chat_id:
+        allowed_chat_ids.add(kitchen.owner_chat_id)
+
+    if kitchen.staff_chat_ids:
+        allowed_chat_ids.update(kitchen.staff_chat_ids)
+
+    if chat_id not in allowed_chat_ids:
         return
 
     _, _, order_id = q.data.split(":", 2)
@@ -3108,7 +3192,21 @@ CHECKOUT_TYPE, CHECKOUT_COMMENT, CHECKOUT_CONFIRM = range(3)
 async def on_staff_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
 
-    if chat_id not in STAFF_CHAT_IDS:
+    from kitchen_context import _REGISTRY
+
+    kitchen = _REGISTRY.get(kitchen_id)
+    if not kitchen:
+        return
+
+    allowed_chat_ids = set()
+
+    if kitchen.owner_chat_id:
+        allowed_chat_ids.add(kitchen.owner_chat_id)
+
+    if kitchen.staff_chat_ids:
+        allowed_chat_ids.update(kitchen.staff_chat_ids)
+
+    if chat_id not in allowed_chat_ids:
         return
 
     product_id = pop_waiting_photo(context)
@@ -3335,7 +3433,21 @@ async def on_staff_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def on_staff_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
 
-    if chat_id not in STAFF_CHAT_IDS:
+    from kitchen_context import _REGISTRY
+
+    kitchen = _REGISTRY.get(kitchen_id)
+    if not kitchen:
+        return
+
+    allowed_chat_ids = set()
+
+    if kitchen.owner_chat_id:
+        allowed_chat_ids.add(kitchen.owner_chat_id)
+
+    if kitchen.staff_chat_ids:
+        allowed_chat_ids.update(kitchen.staff_chat_ids)
+
+    if chat_id not in allowed_chat_ids:
         return
 
     product_id = pop_waiting_price(context)
@@ -3387,7 +3499,21 @@ async def checkout_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 async def on_staff_description(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
 
-    if chat_id not in STAFF_CHAT_IDS:
+    from kitchen_context import _REGISTRY
+
+    kitchen = _REGISTRY.get(kitchen_id)
+    if not kitchen:
+        return
+
+    allowed_chat_ids = set()
+
+    if kitchen.owner_chat_id:
+        allowed_chat_ids.add(kitchen.owner_chat_id)
+
+    if kitchen.staff_chat_ids:
+        allowed_chat_ids.update(kitchen.staff_chat_ids)
+
+    if chat_id not in allowed_chat_ids:
         return
 
     product_id = pop_waiting_desc(context)
@@ -3678,7 +3804,21 @@ async def render_catalog_categories(context: ContextTypes.DEFAULT_TYPE, chat_id:
 async def catalog_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
 
-    if chat_id not in STAFF_CHAT_IDS:
+    from kitchen_context import _REGISTRY
+
+    kitchen = _REGISTRY.get(kitchen_id)
+    if not kitchen:
+        return
+
+    allowed_chat_ids = set()
+
+    if kitchen.owner_chat_id:
+        allowed_chat_ids.add(kitchen.owner_chat_id)
+
+    if kitchen.staff_chat_ids:
+        allowed_chat_ids.update(kitchen.staff_chat_ids)
+
+    if chat_id not in allowed_chat_ids:
         return
 
     products = read_products_from_sheets()
