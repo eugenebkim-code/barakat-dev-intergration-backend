@@ -42,3 +42,25 @@ def kb_staff_pickup_eta(order_id: str, kitchen_id: str) -> InlineKeyboardMarkup:
             ),
         ],
     ])
+
+
+def kb_staff_order(order_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ Принять", callback_data=f"staff:approve:{order_id}"),
+            InlineKeyboardButton("❌ Отклонить", callback_data=f"staff:reject:{order_id}"),
+        ]
+    ])
+
+from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+
+
+def kb_staff_only_check(order_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "🧾 Открыть чек",
+                callback_data=f"payproof:{order_id}",
+            )
+        ]
+    ])

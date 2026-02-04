@@ -615,6 +615,19 @@ def kb_staff_order(order_id: str) -> InlineKeyboardMarkup:
         ]
     ])
 
+from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+
+def kb_staff_only_check(order_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "🧾 Открыть чек",
+                callback_data=f"payproof:{order_id}",
+            )
+        ]
+    ])
+
+
 def set_waiting_photo(context: ContextTypes.DEFAULT_TYPE, product_id: str):
     context.user_data["waiting_photo_for"] = product_id
 
@@ -3746,6 +3759,154 @@ async def render_catalog_products(
         )
         track_msg(context, m.message_id)
 
+#===========HANDLE SCREENSHOTS======================#
+
+
+def build_payment_proof_button(payment_file_id: str):
+    if not payment_file_id:
+        return None
+
+    if not payment_file_id.startswith("upload:"):
+        return None
+
+    upload_id = payment_file_id.split("upload:", 1)[1]
+
+    WEB_API_URL = os.getenv(
+        "WEB_API_URL",
+        "https://web-api-integration-production.up.railway.app",
+    )
+
+    proof_url = f"{WEB_API_URL}/api/v1/uploads/payment-proof/{upload_id}"
+
+    from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🧾 Открыть чек", url=proof_url)]
+    ])
+
+def build_payment_proof_kb(payment_file_id: str):
+    """
+    Возвращает клавиатуру с кнопкой 'Открыть чек' или None.
+    Ожидаем, что payment_file_id будет типа 'upload:<upload_id>'.
+    """
+    log.error(f"[PAYMENT_KB] WEB_API_URL={os.getenv('WEB_API_URL')}")
+    log.error(f"[PAYMENT_KB] payment_file_id={payment_file_id}")
+
+    if not payment_file_id:
+        return None
+
+    s = str(payment_file_id).strip()
+    if not s.startswith("upload:"):
+        return None
+
+    upload_id = s.split("upload:", 1)[1].strip()
+    if not upload_id:
+        return None
+
+    web_api_url = os.getenv("WEB_API_URL", "").rstrip("/")
+    if not web_api_url:
+        return None
+
+    url = f"{web_api_url}/api/v1/uploads/payment-proof/{upload_id}"
+
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🧾 Открыть чек", url=url)]
+    ])
+
+def merge_inline_keyboards(*kbs):
+    """
+    Склеивает несколько InlineKeyboardMarkup в одну.
+    None игнорируем.
+    """
+    rows = []
+    for kb in kbs:
+        if not kb:
+            continue
+        try:
+            rows.extend(kb.inline_keyboard or [])
+        except Exception:
+            pass
+
+    return InlineKeyboardMarkup(rows) if rows else None
+
+async def on_open_payment_proof(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not query:
+        return
+
+    data = query.data or ""
+    if not data.startswith("open_proof:"):
+        return
+
+    await query.answer()
+
+    order_id = data.split(":", 1)[1]
+
+    # --- читаем заказ из Sheets ---
+    service = get_sheets_service()
+
+    rows = (
+        service.spreadsheets()
+        .values()
+        .get(
+            spreadsheetId=context.bot_data["spreadsheet_id"],
+            range=ORDERS_RANGE,
+        )
+        .execute()
+        .get("values", [])
+    )
+
+    order_row = None
+    for r in rows[1:]:
+        if r and r[0] == order_id:
+            order_row = r
+            break
+
+    if not order_row:
+        await query.message.reply_text("❌ Чек не найден")
+        return
+
+    payment_file_id = order_row[8] if len(order_row) > 8 else ""
+    if not payment_file_id.startswith("upload:"):
+        await query.message.reply_text("❌ Чек не найден")
+        return
+
+    upload_id = payment_file_id.split("upload:", 1)[1]
+
+    # --- идем в Web API ---
+    web_api_url = os.getenv("WEB_API_URL", "").rstrip("/")
+    api_key = os.getenv("WEB_API_KEY")
+
+    if not web_api_url or not api_key:
+        await query.message.reply_text("❌ Web API не настроен")
+        return
+
+    file_url = f"{web_api_url}/api/v1/uploads/payment-proof/{upload_id}"
+
+    headers = {
+        "x-api-key": api_key,
+    }
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(file_url, headers=headers) as resp:
+                if resp.status != 200:
+                    await query.message.reply_text("❌ Не удалось получить чек")
+                    return
+
+                image_bytes = await resp.read()
+
+        await context.bot.send_photo(
+            chat_id=query.message.chat.id,
+            photo=image_bytes,
+            caption=f"🧾 Чек по заказу {order_id}",
+        )
+
+    except Exception as e:
+        await query.message.reply_text("❌ Ошибка при загрузке чека")
+
+#===========NOTIFY STAFF======================#
+
 async def notify_staff(bot, kitchen, order_id: str):
     log.error("🔥🔥🔥 notify_staff CALLED")
 
@@ -3872,23 +4033,19 @@ async def notify_staff(bot, kitchen, order_id: str):
 
     for staff_id in staff_chat_ids:
         try:
-            proof_url = parse_payment_proof(payment_file_id)
+            proof_kb = build_payment_proof_kb(payment_file_id)
 
-            if proof_url:
-                msg = await bot.send_photo(
-                    chat_id=staff_id,
-                    photo=proof_url,
-                    caption=caption,
-                    parse_mode="HTML",
-                    reply_markup=kb_staff_order(order_id),
-                )
-            else:
-                msg = await bot.send_message(
-                    chat_id=staff_id,
-                    text=caption,
-                    parse_mode="HTML",
-                    reply_markup=kb_staff_order(order_id),
-                )
+            reply_markup = merge_inline_keyboards(
+                proof_kb,
+                kb_staff_order(order_id),
+            )
+
+            msg = await bot.send_message(
+                chat_id=staff_id,
+                text=caption,
+                parse_mode="HTML",
+                reply_markup=reply_markup,
+            )
 
             if first_msg is None:
                 first_msg = msg
@@ -4034,8 +4191,12 @@ def main():
         )
     )
 
-    
-
+    app.add_handler(
+        CallbackQueryHandler(
+            on_open_payment_proof,
+            pattern=r"^open_proof:"
+        )
+    )
     # -------- COMMANDS --------
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("restart", restart_cmd))

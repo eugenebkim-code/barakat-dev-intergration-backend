@@ -15,8 +15,7 @@ from config import (
 )
 from sheets_repo import get_sheets_service
 from staff_decision import handle_staff_decision
-from keyboards_staff import kb_staff_pickup_eta
-
+from keyboards_staff import kb_staff_pickup_eta, kb_staff_only_check
 log = logging.getLogger("STAFF_CALLBACKS")
 
 
@@ -98,14 +97,14 @@ async def staff_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.edit_text(
                 text=base_text + f"\n\n<b>{suffix}</b>",
                 parse_mode=ParseMode.HTML,
-                reply_markup=msg.reply_markup,
+                reply_markup=kb_staff_only_check(order_id),
             )
         else:
             base_caption = msg.caption or ""
             await msg.edit_caption(
                 caption=base_caption + f"\n\n<b>{suffix}</b>",
                 parse_mode=ParseMode.HTML,
-                reply_markup=msg.reply_markup,
+                reply_markup=kb_staff_only_check(order_id),
             )
 
         log.info(f"Staff message updated for order {order_id}")
@@ -115,11 +114,6 @@ async def staff_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # если отклонено — просто удаляем сообщение
     if decision != "approved":
-        try:
-            await query.message.delete()
-            log.info(f"Staff message deleted for order {order_id} (rejected)")
-        except Exception:
-            log.exception("Failed to delete staff message (rejected)")
         return
     
      # 3) approved → фиксируем ожидание ETA и отправляем кнопки
@@ -193,10 +187,4 @@ async def staff_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         log.info(f"✅ ETA buttons sent: order={order_id}, kitchen={kitchen_id}")
     except Exception:
         log.exception(f"failed to send ETA buttons for order {order_id}")
-
-    # 5) Удаляем сообщение
-    try:
-        await query.message.delete()
-        log.info(f"Staff message deleted for order {order_id} (approved)")
-    except Exception:
-        log.exception("Failed to delete staff message (approved)")
+  
