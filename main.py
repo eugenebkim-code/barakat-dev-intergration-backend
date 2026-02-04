@@ -3214,9 +3214,18 @@ async def on_staff_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("✅ Время курьера сохранено.")
         return
 
+    # ===== STAFF CHECK (MULTI-KITCHEN) =====
+    from kitchen_context import _REGISTRY
 
     chat_id = update.effective_chat.id
-    if chat_id not in STAFF_CHAT_IDS:
+    is_staff = False
+
+    for kitchen in _REGISTRY.values():
+        if chat_id == kitchen.owner_chat_id or chat_id in kitchen.staff_chat_ids:
+            is_staff = True
+            break
+
+    if not is_staff:
         return
 
     if "broadcast" in context.user_data:
@@ -4268,7 +4277,7 @@ def main():
     # -------- STAFF --------
     app.add_handler(
         MessageHandler(
-            filters.PHOTO & filters.Chat(STAFF_CHAT_IDS),
+            filters.PHOTO,
             on_staff_photo
         )
     )
@@ -4276,7 +4285,7 @@ def main():
     # -------- STAFF TEXT --------
     app.add_handler(
         MessageHandler(
-            filters.TEXT & ~filters.COMMAND & filters.Chat(STAFF_CHAT_IDS),
+            filters.TEXT & ~filters.COMMAND,
             on_staff_text
         ),
         group=10
@@ -4284,13 +4293,7 @@ def main():
 
     app.bot_data["SHEETS_SERVICE"] = None
 
-    register_broadcast_handlers(
-        app,
-        owner_chat_id=OWNER_CHAT_ID_INT,
-        staff_chat_ids=STAFF_CHAT_IDS,
-        sheets_service=None,
-        spreadsheet_id=SPREADSHEET_ID,
-    )
+    register_broadcast_handlers(app)
 
     log.info("### START POLLING ###")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
