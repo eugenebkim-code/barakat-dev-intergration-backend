@@ -2,7 +2,7 @@
 
 import os
 import json
-from pathlib import Path
+import base64
 from typing import Tuple, Optional
 
 from google.oauth2.service_account import Credentials
@@ -10,47 +10,49 @@ from googleapiclient.discovery import build
 
 
 # -------------------------------------------------
-# ENV
-# -------------------------------------------------
-
-SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
-
-if not SPREADSHEET_ID:
-    raise RuntimeError("SPREADSHEET_ID is not set")
-
-
-# -------------------------------------------------
 # CONSTANTS
 # -------------------------------------------------
 
 ORDERS_RANGE = "orders!A:AD"
+_SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
 
 # -------------------------------------------------
-# Service account file
+# Sheets service (lazy, b64, Railway-safe)
 # -------------------------------------------------
 
-BASE_DIR = Path(__file__).resolve().parent
-SERVICE_ACCOUNT_PATH = BASE_DIR / "service_account.json"
+_sheets_service = None
 
-if not SERVICE_ACCOUNT_PATH.exists():
-    raise RuntimeError(f"service_account.json not found at {SERVICE_ACCOUNT_PATH}")
-
-
-# -------------------------------------------------
-# Sheets service
-# -------------------------------------------------
 
 def get_sheets_service():
-    with open(SERVICE_ACCOUNT_PATH, "r", encoding="utf-8") as f:
-        service_account_info = json.load(f)
+    global _sheets_service
+    if _sheets_service:
+        return _sheets_service
+
+    b64 = os.getenv("GOOGLE_SERVICE_ACCOUNT_B64", "").strip()
+    if not b64:
+        raise RuntimeError("GOOGLE_SERVICE_ACCOUNT_B64 is not set")
+
+    try:
+        service_account_info = json.loads(
+            base64.b64decode(b64).decode("utf-8")
+        )
+    except Exception as e:
+        raise RuntimeError("Invalid GOOGLE_SERVICE_ACCOUNT_B64") from e
 
     creds = Credentials.from_service_account_info(
         service_account_info,
-        scopes=["https://www.googleapis.com/auth/spreadsheets"],
+        scopes=_SCOPES,
     )
 
-    return build("sheets", "v4", credentials=creds)
+    _sheets_service = build(
+        "sheets",
+        "v4",
+        credentials=creds,
+        cache_discovery=False,
+    )
+
+    return _sheets_service
 
 
 # -------------------------------------------------
@@ -60,15 +62,17 @@ def get_sheets_service():
 def find_order_row_by_id(
     order_id: str,
     *,
-    spreadsheet_id: Optional[str] = None,
+    spreadsheet_id: str,
 ) -> Tuple[Optional[int], Optional[dict]]:
+    """
+    Ищет заказ по order_id.
+    spreadsheet_id ОБЯЗАТЕЛЕН.
+    """
     service = get_sheets_service()
     sheet = service.spreadsheets()
 
-    sid = spreadsheet_id or SPREADSHEET_ID
-
     rows = sheet.values().get(
-        spreadsheetId=sid,
+        spreadsheetId=spreadsheet_id,
         range=ORDERS_RANGE,
     ).execute().get("values", [])
 
@@ -84,21 +88,20 @@ def find_order_row_by_id(
 
 
 def update_order_cells(
+    *,
     row_idx: int,
     updates: dict,
-    spreadsheet_id: str | None = None,
+    spreadsheet_id: str,
 ):
     """
-    Обновляет ячейки заказа в таблице.
+    Обновляет ячейки заказа.
 
     row_idx: номер строки заказа (1-based)
     updates: словарь вида {column_name: value}
-    spreadsheet_id: ID таблицы (если None, используется глобальный)
+    spreadsheet_id: ОБЯЗАТЕЛЕН
     """
     service = get_sheets_service()
     sheet = service.spreadsheets()
-
-    sid = spreadsheet_id or SPREADSHEET_ID
 
     col_map = {
         "status": "J",
@@ -113,7 +116,7 @@ def update_order_cells(
             continue
 
         sheet.values().update(
-            spreadsheetId=sid,
+            spreadsheetId=spreadsheet_id,
             range=f"orders!{col}{row_idx}",
             valueInputOption="RAW",
             body={"values": [[value]]},
