@@ -12,12 +12,15 @@ from telegram.ext import (
     filters,
 )
 
+from kitchen_context import _REGISTRY
+from sheets_repo import get_sheets_service
+
 log = logging.getLogger("Broadcast")
 
 # ===== helpers =====
 
-def is_admin(chat_id: int, owner_id: int, staff_ids: set[int]) -> bool:
-    return chat_id == owner_id or chat_id in staff_ids
+def is_kitchen_admin(chat_id: int, kitchen) -> bool:
+    return chat_id == kitchen.owner_chat_id or chat_id in kitchen.staff_chat_ids
 
 
 def get_all_user_ids(sheet_service, spreadsheet_id: str) -> list[int]:
@@ -35,15 +38,37 @@ def get_all_user_ids(sheet_service, spreadsheet_id: str) -> list[int]:
     return ids
 
 
+def get_service(context):
+    if context.bot_data.get("SHEETS_SERVICE") is None:
+        context.bot_data["SHEETS_SERVICE"] = get_sheets_service()
+    return context.bot_data["SHEETS_SERVICE"]
+
+
 # ===== handlers =====
 
 async def start_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
 
-    if not is_admin(chat_id, context.bot_data["OWNER_CHAT_ID"], context.bot_data["STAFF_CHAT_IDS"]):
+    # kitchen_id должен быть уже определен (например, из текущего контекста стафа)
+    kitchen_id = context.user_data.get("kitchen_id")
+    if not kitchen_id:
+        log.warning("start_broadcast called without kitchen_id in user_data")
         return
 
-    context.user_data["broadcast"] = {}
+    kitchen = _REGISTRY.get(kitchen_id)
+    if not kitchen:
+        log.warning(f"start_broadcast: kitchen not found ({kitchen_id})")
+        return
+
+    if not is_kitchen_admin(chat_id, kitchen):
+        log.warning(
+            f"Unauthorized broadcast start | user={chat_id} kitchen={kitchen_id}"
+        )
+        return
+
+    context.user_data["broadcast"] = {
+        "kitchen_id": kitchen_id,
+    }
 
     await update.message.reply_text(
         "📢 <b>Рассылка</b>\n\n"
@@ -60,19 +85,25 @@ async def on_broadcast_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not text:
         return
 
-    context.user_data["broadcast"]["text"] = text
+    broadcast = context.user_data["broadcast"]
+    broadcast["text"] = text
 
-    # считаем получателей
-    service = context.bot_data["SHEETS_SERVICE"]
-    spreadsheet_id = context.bot_data["SPREADSHEET_ID"]
+    kitchen_id = broadcast.get("kitchen_id")
+    kitchen = _REGISTRY.get(kitchen_id)
+    if not kitchen:
+        log.warning(f"on_broadcast_text: kitchen not found ({kitchen_id})")
+        return
+
+    service = get_service(context)
+    spreadsheet_id = kitchen.spreadsheet_id
 
     all_ids = get_all_user_ids(service, spreadsheet_id)
-    owner = context.bot_data["OWNER_CHAT_ID"]
-    staff = context.bot_data["STAFF_CHAT_IDS"]
+
+    owner = kitchen.owner_chat_id
+    staff = kitchen.staff_chat_ids
 
     recipients = [uid for uid in all_ids if uid != owner and uid not in staff]
-
-    context.user_data["broadcast"]["recipients"] = recipients
+    broadcast["recipients"] = recipients
 
     kb = InlineKeyboardMarkup([
         [
@@ -89,10 +120,6 @@ async def on_broadcast_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=kb,
     )
 
-def get_service(context):
-    if context.bot_data.get("SHEETS_SERVICE") is None:
-        context.bot_data["SHEETS_SERVICE"] = get_sheets_service()
-    return context.bot_data["SHEETS_SERVICE"]
 
 async def on_broadcast_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -111,6 +138,18 @@ async def on_broadcast_confirm(update: Update, context: ContextTypes.DEFAULT_TYP
 
     broadcast = context.user_data.get("broadcast")
     if not broadcast:
+        return
+
+    kitchen_id = broadcast.get("kitchen_id")
+    kitchen = _REGISTRY.get(kitchen_id)
+    if not kitchen:
+        log.warning(f"on_broadcast_confirm: kitchen not found ({kitchen_id})")
+        return
+
+    if not is_kitchen_admin(chat_id, kitchen):
+        log.warning(
+            f"Unauthorized broadcast send | user={chat_id} kitchen={kitchen_id}"
+        )
         return
 
     text = broadcast["text"]
@@ -132,7 +171,7 @@ async def on_broadcast_confirm(update: Update, context: ContextTypes.DEFAULT_TYP
                 parse_mode=ParseMode.HTML,
             )
             sent += 1
-            await asyncio.sleep(0.05)  # антифлуд
+            await asyncio.sleep(0.05)
         except Exception:
             failed += 1
             await asyncio.sleep(0.1)
@@ -152,19 +191,7 @@ async def on_broadcast_confirm(update: Update, context: ContextTypes.DEFAULT_TYP
 
 # ===== register =====
 
-def register_broadcast_handlers(
-    app,
-    *,
-    owner_chat_id: int,
-    staff_chat_ids: set[int],
-    sheets_service,
-    spreadsheet_id: str,
-):
-    app.bot_data["OWNER_CHAT_ID"] = owner_chat_id
-    app.bot_data["STAFF_CHAT_IDS"] = staff_chat_ids
-    app.bot_data["SHEETS_SERVICE"] = sheets_service
-    app.bot_data["SPREADSHEET_ID"] = spreadsheet_id
-
+def register_broadcast_handlers(app):
     app.add_handler(CommandHandler("broadcast", start_broadcast))
     app.add_handler(
         MessageHandler(
@@ -177,4 +204,3 @@ def register_broadcast_handlers(
         CallbackQueryHandler(on_broadcast_confirm, pattern=r"^broadcast:")
     )
     print("BROADCAST MODULE LOADED")
-    print(dir())

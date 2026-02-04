@@ -1,22 +1,6 @@
 # main.py — MarketPlace EASYGO
 # Требования:
 # - Python + python-telegram-bot v20+
-# - без AI/оплаты/админки
-# - один ADMIN_CHAT_ID
-# - "одно окно": при любом действии удаляем предыдущие сообщения бота и рисуем заново
-#
-# ENV:
-#   BOT_TOKEN=...
-#   ADMIN_CHAT_ID=123456789
-#
-# Файлы рядом:
-#   main.py
-#   catalog.py
-#   
-# IMPORTANT:
-# ForceReply messages must be handled via filters.REPLY
-# filters.TEXT is unreliable after callbacks + deleteMessage
-
 
 import os
 import logging
@@ -98,18 +82,35 @@ from marketplace_handlers import (
 from types import SimpleNamespace
 from marketplace_handlers import get_active_kitchen
 from kitchen_context import KitchenContext
-from config import (
-    BOT_TOKEN,
-    OWNER_CHAT_ID_INT,
-    ADMIN_CHAT_ID_INT,
-    STAFF_CHAT_IDS,
-    SPREADSHEET_ID,
-    ORDERS_RANGE,   # 👈 ВОТ ЭТО ДОБАВЛЯЕМ
-)
+from config import BOT_TOKEN, ADMIN_IDS
+
 HOME_PHOTO_FILE_ID = "AgACAgUAAxkBAAIBWml2tkzPZ3lgBPKTVeeA3Wi9Z3yJAAKuDWsbhLi4VyKeP_hEUISAAQADAgADeQADOAQ"
 import inspect
 import requests
 from config import WEB_API_BASE_URL, WEB_API_KEY, WEB_API_TIMEOUT
+
+import os
+import json
+import base64
+from google.oauth2.service_account import Credentials
+from googleapiclient.discovery import build
+
+def get_sheets_service():
+    b64 = os.getenv("GOOGLE_SERVICE_ACCOUNT_B64")
+    if not b64:
+        raise RuntimeError("GOOGLE_SERVICE_ACCOUNT_B64 not set")
+
+    info = json.loads(
+        base64.b64decode(b64).decode("utf-8")
+    )
+
+    creds = Credentials.from_service_account_info(
+        info,
+        scopes=["https://www.googleapis.com/auth/spreadsheets"],
+    )
+
+    return build("sheets", "v4", credentials=creds)
+
 
 logger = logging.getLogger(__name__)
 
@@ -1171,7 +1172,7 @@ async def dash_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pass
 
     # --- админская кнопка ---
-    if chat_id == ADMIN_CHAT_ID_INT and owner_debt > 0:
+    if chat_id == ADMIN_IDS and owner_debt > 0:
         await context.bot.send_message(
             chat_id=chat_id,
             text="Получены деньги от владельца. Закрыть период?",
@@ -2912,7 +2913,7 @@ async def on_owner_commission_paid(update: Update, context: ContextTypes.DEFAULT
     q = update.callback_query
     await q.answer()
 
-    if q.message.chat_id != ADMIN_CHAT_ID_INT:
+    if q.message.chat_id not in ADMIN_IDS:
         return
 
     if q.data != "owner:commission_paid_apply":
@@ -2968,7 +2969,7 @@ async def on_owner_commission_paid(update: Update, context: ContextTypes.DEFAULT
                 period_from,
                 period_to,
                 orders_count,
-                str(ADMIN_CHAT_ID_INT),
+                ",".join(str(x) for x in ADMIN_IDS),
                 "",
             ]]
         },
@@ -2994,10 +2995,13 @@ async def on_owner_commission_paid(update: Update, context: ContextTypes.DEFAULT
     await context.bot.send_message(
         chat_id=ADMIN_CHAT_ID_INT,
         text=(
-            "✅ Платеж зафиксирован\n\n"
-            f"💰 Сумма: {_fmt_money(total_amount)}\n"
-            f"📦 Заказов: {orders_count}"
+            "⚠️ <b>Подтверждение закрытия периода</b>\n\n"
+            f"📦 Заказов: <b>{orders_count}</b>\n"
+            f"💰 Сумма: <b>{_fmt_money(total_amount)}</b>\n\n"
+            "Закрыть период и отметить оплату?"
         ),
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb_owner_paid_confirm(),
     )
 
     try:
@@ -3009,7 +3013,7 @@ async def on_owner_commission_paid_confirm(update: Update, context: ContextTypes
     q = update.callback_query
     await q.answer()
 
-    if q.message.chat_id != ADMIN_CHAT_ID_INT:
+    if q.message.chat_id not in ADMIN_IDS:
         return
 
     service = get_sheets_service()
@@ -3035,17 +3039,18 @@ async def on_owner_commission_paid_confirm(update: Update, context: ContextTypes
         await q.answer("Нет задолженности", show_alert=True)
         return
 
-    await context.bot.send_message(
-        chat_id=ADMIN_CHAT_ID_INT,
-        text=(
-            "⚠️ <b>Подтверждение закрытия периода</b>\n\n"
-            f"📦 Заказов: <b>{orders_count}</b>\n"
-            f"💰 Сумма: <b>{_fmt_money(total_amount)}</b>\n\n"
-            "Закрыть период и отметить оплату?"
-        ),
-        parse_mode=ParseMode.HTML,
-        reply_markup=kb_owner_paid_confirm(),
-    )
+    for admin_id in ADMIN_IDS:
+        await context.bot.send_message(
+            chat_id=admin_id,
+            text=(
+                "⚠️ <b>Подтверждение закрытия периода</b>\n\n"
+                f"📦 Заказов: <b>{orders_count}</b>\n"
+                f"💰 Сумма: <b>{_fmt_money(total_amount)}</b>\n\n"
+                "Закрыть период и отметить оплату?"
+            ),
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb_owner_paid_confirm(),
+        )
 
     try:
         await q.message.delete()
