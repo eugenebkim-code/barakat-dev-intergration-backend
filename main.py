@@ -4185,9 +4185,52 @@ def main():
             log.error(f"❌ Failed to register job for {kitchen_id}: {e}")
 
     log.info("### ORDERS JOBS REGISTRATION COMPLETE ###")
+    asyncio.create_task(manual_orders_loop(app))
+    # -------- LOOP --------
 
+    from types import SimpleNamespace
+    import asyncio
 
-   # -------- Marketplace Handlers --------
+    async def manual_orders_loop(app):
+        await asyncio.sleep(2)  # дать боту стартануть
+
+        from kitchen_context import load_registry, list_kitchens, get
+        from webapp_orders_sync import orders_job  # или откуда у тебя orders_job
+        from sheets_repo import get_sheets_service
+
+        load_registry()
+        kitchen_ids = list_kitchens()
+
+        log.info("🟡 manual_orders_loop started")
+
+        while True:
+            for kitchen_id in kitchen_ids:
+                try:
+                    kitchen = get(kitchen_id)
+                    if not kitchen or kitchen.status != "active":
+                        continue
+
+                    fake_context = SimpleNamespace(
+                        bot=app.bot,
+                        job=SimpleNamespace(
+                            data={
+                                "spreadsheet_id": kitchen.spreadsheet_id,
+                                "kitchen_id": kitchen_id,
+                            }
+                        ),
+                    )
+
+                    await orders_job(fake_context)
+
+                except Exception as e:
+                    log.error(
+                        f"[manual-orders] kitchen={kitchen_id} error={e}",
+                        exc_info=True,
+                    )
+
+            await asyncio.sleep(5)
+
+    # -------- Marketplace Handlers --------
     app.add_handler(
         CallbackQueryHandler(
             marketplace_back,
@@ -4296,7 +4339,10 @@ def main():
 
     log.info("### START POLLING ###")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
-        
+
+
+
+
 # -------- BUYER PHOTO (payment proof) --------
 print("### MAIN FILE REACHED END ###")
     
