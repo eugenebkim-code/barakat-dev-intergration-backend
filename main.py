@@ -610,7 +610,7 @@ def save_order_to_sheets(
 def kb_staff_order(order_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("✅ Принять", callback_data=f"staff:approve:{order_id}"),
+            InlineKeyboardButton("✅ Принять", callback_data=f"staff:approve:{order_id}:{kitchen_id}"),
             InlineKeyboardButton("❌ Отклонить", callback_data=f"staff:reject:{order_id}"),
         ]
     ])
@@ -4050,7 +4050,7 @@ async def notify_staff(bot, kitchen, order_id: str):
 
             reply_markup = merge_inline_keyboards(
                 proof_kb,
-                kb_staff_order(order_id),
+                kb_staff_order(order_id, kitchen.id),
             )
 
             msg = await bot.send_message(
