@@ -607,11 +607,11 @@ def save_order_to_sheets(
         return None
     
 
-def kb_staff_order(order_id: str) -> InlineKeyboardMarkup:
+def kb_staff_order(order_id: str, kitchen_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton("✅ Принять", callback_data=f"staff:approve:{order_id}:{kitchen_id}"),
-            InlineKeyboardButton("❌ Отклонить", callback_data=f"staff:reject:{order_id}"),
+            InlineKeyboardButton("❌ Отклонить", callback_data=f"staff:reject:{order_id}:{kitchen_id}"),
         ]
     ])
 
@@ -3944,7 +3944,7 @@ async def notify_staff(bot, kitchen, order_id: str):
         staff_chat_ids.add(owner_chat_id)
 
     if not staff_chat_ids:
-        log.warning(f"no staff recipients for kitchen={kitchen.id}")
+        log.warning("no staff recipients")
         return None
 
     # --- sheets ---
@@ -4044,15 +4044,20 @@ async def notify_staff(bot, kitchen, order_id: str):
     # --- отправка ---
     first_msg = None
 
+    # --- клавиатуры собираем ОДИН РАЗ ---
+    reply_markup = None
+    try:
+        proof_kb = build_payment_proof_kb(payment_file_id)
+        reply_markup = merge_inline_keyboards(
+            proof_kb,
+            kb_staff_order(order_id, kitchen.kitchen_id),
+        )
+    except Exception as e:
+        log.error(f"notify_staff keyboard build failed: {e}")
+
+    # --- отправка ---
     for staff_id in staff_chat_ids:
         try:
-            proof_kb = build_payment_proof_kb(payment_file_id)
-
-            reply_markup = merge_inline_keyboards(
-                proof_kb,
-                kb_staff_order(order_id, kitchen.kitchen_id),
-            )
-
             msg = await bot.send_message(
                 chat_id=staff_id,
                 text=caption,
