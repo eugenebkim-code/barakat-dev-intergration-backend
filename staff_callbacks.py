@@ -4,18 +4,9 @@ import logging
 from telegram import Update
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
-
-from config import (
-    BOT_TOKEN,
-    OWNER_CHAT_ID_INT,
-    ADMIN_CHAT_ID_INT,
-    STAFF_CHAT_IDS,
-    SPREADSHEET_ID,
-    ORDERS_RANGE,   # 👈 ВОТ ЭТО ДОБАВЛЯЕМ
-)
-from sheets_repo import get_sheets_service
 from staff_decision import handle_staff_decision
 from keyboards_staff import kb_staff_pickup_eta, kb_staff_only_check
+
 log = logging.getLogger("STAFF_CALLBACKS")
 
 
@@ -24,17 +15,10 @@ async def staff_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not query:
         return
 
+    staff_user = query.from_user
+
     data = query.data or ""
     log.info(f"STAFF CALLBACK DATA: {data}")
-
-    staff_user = query.from_user
-    if staff_user.id not in STAFF_CHAT_IDS:
-        try:
-            await query.answer("Недостаточно прав", show_alert=True)
-        except Exception:
-            pass
-        log.warning(f"Unauthorized staff callback from {staff_user.id}")
-        return
 
     try:
         await query.answer()
@@ -42,16 +26,29 @@ async def staff_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pass
 
     parts = data.split(":")
-
-    if len(parts) < 3:
+    if len(parts) < 4:
         log.error(f"Bad callback data format: {data}")
         return
 
-    prefix = parts[0]
-    action = parts[1]
-    order_id = parts[2]
+    prefix, action, order_id, kitchen_id = parts[:4]
 
-    # принимаем ТОЛЬКО решение стафа
+    from kitchen_context import _REGISTRY
+    kitchen = _REGISTRY.get(kitchen_id)
+
+    if not kitchen:
+        await query.answer("Кухня не найдена", show_alert=True)
+        return
+
+    allowed_ids = {kitchen.owner_chat_id} | kitchen.staff_chat_ids
+
+    if staff_user.id not in allowed_ids:
+        await query.answer("Недостаточно прав", show_alert=True)
+        log.warning(
+            f"Unauthorized staff callback | "
+            f"user={staff_user.id} kitchen={kitchen_id}"
+        )
+        return
+
     if prefix != "staff" or action not in ("approve", "reject"):
         log.info(f"Skip non-staff-decision callback: {data}")
         return
@@ -66,9 +63,6 @@ async def staff_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 1) основная бизнес-логика (статусы, метрики, уведомление клиента)
     try:
-        q = update.callback_query
-        staff_user = q.from_user
-
         await handle_staff_decision(
             context=context,
             bot=context.bot,
@@ -116,67 +110,6 @@ async def staff_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if decision != "approved":
         return
     
-     # 3) approved → фиксируем ожидание ETA и отправляем кнопки
-    
-    kitchen_id = None
-    order_row = None
-    target_idx = None
-    
-    # Ищем заказ во ВСЕХ кухнях
-    from kitchen_context import _REGISTRY
-    
-    service = get_sheets_service()
-    sheet = service.spreadsheets()
-    
-    for kid, kctx in _REGISTRY.items():
-        try:
-            rows = sheet.values().get(
-                spreadsheetId=kctx.spreadsheet_id,
-                range=ORDERS_RANGE,
-            ).execute().get("values", [])
-            
-            for i, r in enumerate(rows[1:], start=2):
-                if r and r[0] == order_id:
-                    kitchen_id = kid
-                    order_row = r
-                    target_idx = i
-                    break
-            
-            if kitchen_id:
-                break
-                
-        except Exception as e:
-            log.warning(f"Failed to search in kitchen {kid}: {e}")
-            continue
-    
-    if not kitchen_id or not order_row or not target_idx:
-        log.error(
-            f"order {order_id} not found in any kitchen. "
-            f"Checked: {list(_REGISTRY.keys())}"
-        )
-        return
-    
-    log.info(
-        f"✅ Order {order_id} found in kitchen {kitchen_id}, row {target_idx}"
-    )
-    
-    # Обновляем статус в ПРАВИЛЬНОЙ таблице
-    try:
-        sheet.values().update(
-            spreadsheetId=_REGISTRY[kitchen_id].spreadsheet_id,
-            range=f"orders!T{target_idx}",
-            valueInputOption="RAW",
-            body={"values": [["courier_pending_eta"]]},
-        ).execute()
-
-        log.info(
-            f"order {order_id} moved to courier_pending_eta "
-            f"(kitchen={kitchen_id}, idx={target_idx})"
-        )
-    except Exception:
-        log.exception("Failed to update courier_pending_eta state")
-        return
-
     # 4) Отправляем кнопки ETA с kitchen_id
     try:
         await context.bot.send_message(
