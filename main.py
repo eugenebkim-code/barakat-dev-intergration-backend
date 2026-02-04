@@ -4260,7 +4260,7 @@ def main():
     # -------- BUYER PHOTO (payment proof) --------
     app.add_handler(
         MessageHandler(
-            (filters.PHOTO | filters.Document.IMAGE) & ~filters.Chat(STAFF_CHAT_IDS),
+            (filters.PHOTO | filters.Document.IMAGE)
             on_buyer_payment_photo
         )
     )
