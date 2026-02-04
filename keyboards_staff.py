@@ -44,11 +44,11 @@ def kb_staff_pickup_eta(order_id: str, kitchen_id: str) -> InlineKeyboardMarkup:
     ])
 
 
-def kb_staff_order(order_id: str) -> InlineKeyboardMarkup:
+def kb_staff_order(order_id: str, kitchen_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("✅ Принять", callback_data=f"staff:approve:{order_id}"),
-            InlineKeyboardButton("❌ Отклонить", callback_data=f"staff:reject:{order_id}"),
+            InlineKeyboardButton("✅ Принять", callback_data=f"staff:approve:{order_id}:{kitchen_id}"),
+            InlineKeyboardButton("❌ Отклонить", callback_data=f"staff:reject:{order_id}:{kitchen_id}"),
         ]
     ])
 

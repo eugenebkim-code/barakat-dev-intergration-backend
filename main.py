@@ -4050,7 +4050,7 @@ async def notify_staff(bot, kitchen, order_id: str):
 
             reply_markup = merge_inline_keyboards(
                 proof_kb,
-                kb_staff_order(order_id, kitchen.id),
+                kb_staff_order(order_id, kitchen.kitchen_id),
             )
 
             msg = await bot.send_message(

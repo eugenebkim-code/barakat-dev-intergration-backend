@@ -38,17 +38,10 @@ async def staff_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     from kitchen_context import _REGISTRY
 
-    # если kitchen_id не пришел — пытаемся восстановить по order_id
     if not kitchen_id:
-        for k in _REGISTRY.values():
-            if not k.spreadsheet_id:
-                await query.answer("Не найден spreadsheet кухни", show_alert=True)
-                return
-
-        if not kitchen_id:
-            log.error(f"Cannot resolve kitchen_id for order {order_id}")
-            await query.answer("Ошибка: кухня не определена", show_alert=True)
-            return
+        log.error(f"staff callback without kitchen_id: {data}")
+        await query.answer("Ошибка: не определена кухня", show_alert=True)
+        return
 
     kitchen = _REGISTRY.get(kitchen_id)
 
