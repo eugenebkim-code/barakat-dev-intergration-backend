@@ -1,15 +1,3 @@
-# staff_callbacks.py
-
-import logging
-from telegram import Update
-from telegram.ext import ContextTypes
-from telegram.constants import ParseMode
-from staff_decision import handle_staff_decision
-from keyboards_staff import kb_staff_pickup_eta, kb_staff_only_check
-
-log = logging.getLogger("STAFF_CALLBACKS")
-
-
 async def staff_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if not query:
@@ -26,13 +14,31 @@ async def staff_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pass
 
     parts = data.split(":")
-    if len(parts) < 4:
+
+    if len(parts) < 3:
         log.error(f"Bad callback data format: {data}")
         return
 
-    prefix, action, order_id, kitchen_id = parts[:4]
+    prefix = parts[0]
+    action = parts[1]
+    order_id = parts[2]
+    kitchen_id = parts[3] if len(parts) >= 4 else None
 
     from kitchen_context import _REGISTRY
+
+    # если kitchen_id не пришел — пытаемся восстановить по order_id
+    if not kitchen_id:
+        for k in _REGISTRY.values():
+            if k.spreadsheet_id and k.orders_sheet_name:
+                # мы НЕ читаем sheets, только логическое сопоставление
+                kitchen_id = k.kitchen_id
+                break
+
+        if not kitchen_id:
+            log.error(f"Cannot resolve kitchen_id for order {order_id}")
+            await query.answer("Ошибка: кухня не определена", show_alert=True)
+            return
+
     kitchen = _REGISTRY.get(kitchen_id)
 
     if not kitchen:
@@ -61,7 +67,6 @@ async def staff_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"staff_user_id={staff_user.id} username={staff_user.username}"
     )
 
-    # 1) основная бизнес-логика (статусы, метрики, уведомление клиента)
     try:
         await handle_staff_decision(
             context=context,
@@ -82,21 +87,18 @@ async def staff_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     suffix = "Принят в работу ✅" if decision == "approved" else "Отклонен ❌"
 
-    # 2) обновляем сообщение стафа
     try:
         msg = query.message
 
         if msg.text:
-            base_text = msg.text
             await msg.edit_text(
-                text=base_text + f"\n\n<b>{suffix}</b>",
+                text=msg.text + f"\n\n<b>{suffix}</b>",
                 parse_mode=ParseMode.HTML,
                 reply_markup=kb_staff_only_check(order_id),
             )
         else:
-            base_caption = msg.caption or ""
             await msg.edit_caption(
-                caption=base_caption + f"\n\n<b>{suffix}</b>",
+                caption=(msg.caption or "") + f"\n\n<b>{suffix}</b>",
                 parse_mode=ParseMode.HTML,
                 reply_markup=kb_staff_only_check(order_id),
             )
@@ -106,11 +108,9 @@ async def staff_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         log.exception("Failed to edit staff message")
 
-    # если отклонено — просто удаляем сообщение
     if decision != "approved":
         return
-    
-    # 4) Отправляем кнопки ETA с kitchen_id
+
     try:
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
@@ -120,4 +120,3 @@ async def staff_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         log.info(f"✅ ETA buttons sent: order={order_id}, kitchen={kitchen_id}")
     except Exception:
         log.exception(f"failed to send ETA buttons for order {order_id}")
-  
