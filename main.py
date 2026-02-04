@@ -4152,6 +4152,12 @@ def main():
             if not kitchen or kitchen.status != "active":
                 log.warning(f"Skip inactive kitchen: {kitchen_id}")
                 continue
+
+            if not app.job_queue:
+                log.warning(
+                    f"JobQueue not available, skip orders job for {kitchen_id}"
+                )
+                continue
             
             # ===== ОДНА JOB: orders_job (sync + notify) =====
             app.job_queue.run_repeating(
@@ -4213,7 +4219,7 @@ def main():
     # -------- BUYER TEXT (checkout replies) --------
     app.add_handler(
         MessageHandler(
-            filters.TEXT & ~filters.COMMAND & ~filters.Chat(STAFF_CHAT_IDS),
+            filters.TEXT & ~filters.COMMAND,
             on_checkout_reply
         ),
         group=1
