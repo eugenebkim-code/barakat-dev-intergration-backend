@@ -1,6 +1,9 @@
 # config.py
 import os
 
+# диапазон заказов (общий для всех кухонь)
+
+ORDERS_RANGE = "orders!A:AF"
 
 # ====== TELEGRAM (ПЛАТФОРМА) ======
 
