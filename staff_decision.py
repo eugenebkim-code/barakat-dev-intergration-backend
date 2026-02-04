@@ -123,8 +123,8 @@ async def handle_staff_decision(
 
     try:
         update_order_cells(
-            row_idx,
-            updates,
+            row_idx=row_idx,
+            updates=updates,
             spreadsheet_id=spreadsheet_id,
         )
     except Exception:
