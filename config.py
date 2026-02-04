@@ -1,15 +1,8 @@
 # config.py
 import os
 
-# диапазон заказов (общий для всех кухонь)
-
-ORDERS_RANGE = "orders!A:AF"
-
-# ====== TELEGRAM (ПЛАТФОРМА) ======
-
+# ====== TELEGRAM ======
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN is not set")
 
 # админы ПЛАТФОРМЫ, не кухонь
 ADMIN_IDS = {
@@ -17,22 +10,25 @@ ADMIN_IDS = {
     for x in os.getenv("ADMIN_IDS", "").split(",")
     if x.strip().isdigit()
 }
-
+if not BOT_TOKEN:
+    raise RuntimeError("BOT_TOKEN is not set")
 if not ADMIN_IDS:
     raise RuntimeError("ADMIN_IDS is not set")
 
+# ====== SPREADSHEETS ======
+# platform sheet: users, registry, platform stats, etc
+PLATFORM_SPREADSHEET_ID = os.getenv("PLATFORM_SPREADSHEET_ID") or os.getenv("SPREADSHEET_ID")
+
+if not PLATFORM_SPREADSHEET_ID:
+    raise RuntimeError("PLATFORM_SPREADSHEET_ID is not set")
+
+# legacy alias (важно для старого кода, где миллиард упоминаний)
+SPREADSHEET_ID = PLATFORM_SPREADSHEET_ID
+
+# ranges
+ORDERS_RANGE = "orders!A:AF"
 
 # ====== WEB API ======
-
-WEB_API_BASE_URL = os.getenv(
-    "WEB_API_BASE_URL",
-    "https://web-api-integration-production.up.railway.app",
-)
-
-WEB_API_KEY = os.getenv("WEB_API_KEY", "")
-WEB_API_TIMEOUT = int(os.getenv("WEB_API_TIMEOUT", "5"))
-
-
-# ====== FEATURE FLAGS / DEFAULTS ======
-
-DEFAULT_ORDERS_RANGE = "orders!A:AF"
+WEB_API_BASE_URL = "https://web-api-integration-production.up.railway.app"
+WEB_API_KEY = "DEV_KEY"
+WEB_API_TIMEOUT = 5
