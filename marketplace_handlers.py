@@ -89,7 +89,7 @@ async def marketplace_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await context.bot.send_message(
         chat_id=q.message.chat_id,
-        text="Выберите кухню:",
+        text="Выберите заведение:",
         reply_markup=kb_kitchen_select(),
     )
 
