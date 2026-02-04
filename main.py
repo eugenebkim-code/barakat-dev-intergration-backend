@@ -2290,12 +2290,6 @@ async def on_staff_eta(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.answer()
 
     chat_id = q.message.chat_id
-    from kitchen_context import _REGISTRY
-
-    kitchen = _REGISTRY.get(kitchen_id)
-    if not kitchen:
-        return
-
     allowed_chat_ids = set()
 
     if kitchen.owner_chat_id:
@@ -2335,10 +2329,7 @@ async def on_staff_eta(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     spreadsheet_id = kitchen.spreadsheet_id
     log.info(f"Kitchen resolved: spreadsheet_id={spreadsheet_id}")
-
-
-
-
+    
     # 3️⃣ Подключение к Sheets
     service = get_sheets_service()
     sheet = service.spreadsheets()
