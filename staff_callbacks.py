@@ -41,10 +41,9 @@ async def staff_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # если kitchen_id не пришел — пытаемся восстановить по order_id
     if not kitchen_id:
         for k in _REGISTRY.values():
-            if k.spreadsheet_id and k.orders_sheet_name:
-                # мы НЕ читаем sheets, только логическое сопоставление
-                kitchen_id = k.kitchen_id
-                break
+            if not k.spreadsheet_id:
+                await query.answer("Не найден spreadsheet кухни", show_alert=True)
+                return
 
         if not kitchen_id:
             log.error(f"Cannot resolve kitchen_id for order {order_id}")
