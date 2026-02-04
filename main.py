@@ -4138,65 +4138,26 @@ def build_checkout_preview(
     )
 
 def main():
-    app = Application.builder().token(BOT_TOKEN).build()
-
-    # 🔗 пробрасываем render_home в marketplace
-    app.bot_data["render_home"] = render_home
-
-    log.info("### BOT STARTED ###")
-    # -------- Marketplace Handlers --------
-
-    from kitchen_context import list_kitchens, get, load_registry
-    from webapp_orders_sync import orders_job  # ✅ ОДНА job
-
-    log.info("### REGISTERING ORDERS JOBS FOR ALL KITCHENS ###")
-
-    load_registry()
-    all_kitchen_ids = list_kitchens()
-
-    for kitchen_id in all_kitchen_ids:
-        try:
-            kitchen = get(kitchen_id)
-            if not kitchen or kitchen.status != "active":
-                log.warning(f"Skip inactive kitchen: {kitchen_id}")
-                continue
-
-            if not app.job_queue:
-                log.warning(
-                    f"JobQueue not available, skip orders job for {kitchen_id}"
-                )
-                continue
-            
-            # ===== ОДНА JOB: orders_job (sync + notify) =====
-            app.job_queue.run_repeating(
-                orders_job,
-                interval=5,
-                first=1,
-                data={
-                    "spreadsheet_id": kitchen.spreadsheet_id,
-                    "kitchen_id": kitchen_id,
-                },
-                name=f"orders:{kitchen_id}",
-            )
-            
-            log.info(f"✅ Registered orders job for {kitchen_id}")
-            
-        except Exception as e:
-            log.error(f"❌ Failed to register job for {kitchen_id}: {e}")
-
-    log.info("### ORDERS JOBS REGISTRATION COMPLETE ###")
-    asyncio.create_task(manual_orders_loop(app))
-    # -------- LOOP --------
-
-    from types import SimpleNamespace
     import asyncio
+    from types import SimpleNamespace
+    from telegram import Update
+    from telegram.ext import (
+        Application,
+        CommandHandler,
+        CallbackQueryHandler,
+        MessageHandler,
+        filters,
+    )
+
+    # -------------------------------
+    # MANUAL ORDERS LOOP
+    # -------------------------------
 
     async def manual_orders_loop(app):
-        await asyncio.sleep(2)  # дать боту стартануть
+        await asyncio.sleep(2)  # дать боту полностью стартануть
 
         from kitchen_context import load_registry, list_kitchens, get
-        from webapp_orders_sync import orders_job  # или откуда у тебя orders_job
-        from sheets_repo import get_sheets_service
+        from webapp_orders_sync import orders_job
 
         load_registry()
         kitchen_ids = list_kitchens()
@@ -4230,13 +4191,40 @@ def main():
 
             await asyncio.sleep(5)
 
-    # -------- Marketplace Handlers --------
+    # -------------------------------
+    # POST INIT (PTB LIFECYCLE)
+    # -------------------------------
+
+    async def post_init(app: Application):
+        app.create_task(manual_orders_loop(app))
+
+    # -------------------------------
+    # APPLICATION INIT
+    # -------------------------------
+
+    app = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .post_init(post_init)
+        .build()
+    )
+
+    # 🔗 пробрасываем render_home в marketplace
+    app.bot_data["render_home"] = render_home
+
+    log.info("### BOT STARTED ###")
+
+    # -------------------------------
+    # MARKETPLACE HANDLERS
+    # -------------------------------
+
     app.add_handler(
         CallbackQueryHandler(
             marketplace_back,
             pattern=r"^market:back$"
         )
     )
+
     app.add_handler(CommandHandler("market", marketplace_start))
 
     app.add_handler(
@@ -4259,7 +4247,11 @@ def main():
             pattern=r"^open_proof:"
         )
     )
-    # -------- COMMANDS --------
+
+    # -------------------------------
+    # COMMANDS
+    # -------------------------------
+
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("restart", restart_cmd))
     app.add_handler(CommandHandler("clear", clear_cmd))
@@ -4267,7 +4259,10 @@ def main():
     app.add_handler(CommandHandler("catalog", catalog_cmd))
     app.add_handler(CommandHandler("dash", dash_cmd))
 
-    # -------- BUYER TEXT (checkout replies) --------
+    # -------------------------------
+    # BUYER TEXT
+    # -------------------------------
+
     app.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND,
@@ -4276,7 +4271,10 @@ def main():
         group=1
     )
 
-    # -------- WEB API --------
+    # -------------------------------
+    # WEB API CALLBACKS
+    # -------------------------------
+
     app.add_handler(CallbackQueryHandler(on_staff_eta, pattern=r"^staff:eta:\d+:"))
     app.add_handler(CallbackQueryHandler(on_staff_no_courier, pattern=r"^staff:no_courier:"))
     app.add_handler(CallbackQueryHandler(on_staff_eta_manual_click, pattern=r"^staff:eta_manual:"))
@@ -4286,7 +4284,10 @@ def main():
     app.add_handler(CallbackQueryHandler(on_owner_commission_paid, pattern=r"^owner:commission_paid_apply$"))
     app.add_handler(CallbackQueryHandler(on_owner_commission_paid_cancel, pattern=r"^owner:commission_paid_cancel$"))
 
-    # -------- CALLBACKS (ВСЕ КНОПКИ) --------
+    # -------------------------------
+    # STAFF CALLBACKS
+    # -------------------------------
+
     app.add_handler(
         CallbackQueryHandler(
             staff_callback,
@@ -4308,7 +4309,10 @@ def main():
         )
     )
 
-    # -------- BUYER PHOTO (payment proof) --------
+    # -------------------------------
+    # BUYER PAYMENT PHOTO
+    # -------------------------------
+
     app.add_handler(
         MessageHandler(
             (filters.PHOTO | filters.Document.IMAGE),
@@ -4316,7 +4320,10 @@ def main():
         )
     )
 
-    # -------- STAFF --------
+    # -------------------------------
+    # STAFF PHOTO
+    # -------------------------------
+
     app.add_handler(
         MessageHandler(
             filters.PHOTO,
@@ -4324,7 +4331,10 @@ def main():
         )
     )
 
-    # -------- STAFF TEXT --------
+    # -------------------------------
+    # STAFF TEXT
+    # -------------------------------
+
     app.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND,
@@ -4339,8 +4349,6 @@ def main():
 
     log.info("### START POLLING ###")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
-
-
 
 
 # -------- BUYER PHOTO (payment proof) --------
