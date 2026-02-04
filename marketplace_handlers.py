@@ -25,17 +25,12 @@ WEBAPP_URL = "https://vuedevmarketplace-production.up.railway.app/"  # имен�
 
 def kb_kitchen_select():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🥟 Восток & Азия", callback_data="marketplace:kitchen:kitchen_1")],
-        [InlineKeyboardButton("🍣 Tokyo Roll", callback_data="marketplace:kitchen:kitchen_2")],
-        [InlineKeyboardButton("🥘 Русский Дом", callback_data="marketplace:kitchen:kitchen_3")],
-        [InlineKeyboardButton("🍔 Urban Grill", callback_data="marketplace:kitchen:kitchen_4")],
-        [InlineKeyboardButton("🌯 Street Food Hub", callback_data="marketplace:kitchen:kitchen_5")],
-
-        # ⬇️ КЛЮЧЕВАЯ КНОПКА
-        [InlineKeyboardButton(
-            "🛒 Открыть маркетплейс",
-            web_app=WebAppInfo(url=WEBAPP_URL)
-        )],
+        [
+            InlineKeyboardButton(
+                "🛒 Открыть маркетплейс",
+                web_app=WebAppInfo(url=WEBAPP_URL)
+            )
+        ],
     ])
 
 # ---------

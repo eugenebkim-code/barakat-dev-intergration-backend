@@ -206,13 +206,15 @@ def save_user_contacts(
     user_id: int,
     real_name: str,
     phone_number: str,
+    telegram_chat_id: int | None = None,
 ) -> bool:
     service = get_sheets_service()
     sheet = service.spreadsheets()
 
+    # читаем пользователей (с запасом под chat_id)
     result = sheet.values().get(
         spreadsheetId=kitchen.spreadsheet_id,
-        range="users!A2:F",
+        range="users!A2:G",
     ).execute()
 
     rows = result.get("values", [])
@@ -226,14 +228,22 @@ def save_user_contacts(
     if not target_row:
         return False
 
+    updates = [
+        {"range": f"users!E{target_row}", "values": [[real_name]]},
+        {"range": f"users!F{target_row}", "values": [[phone_number]]},
+    ]
+
+    # 👇 НОВОЕ, но НЕ ломащее старый флоу
+    if telegram_chat_id is not None:
+        updates.append(
+            {"range": f"users!G{target_row}", "values": [[str(telegram_chat_id)]]}
+        )
+
     sheet.values().batchUpdate(
         spreadsheetId=kitchen.spreadsheet_id,
         body={
             "valueInputOption": "RAW",
-            "data": [
-                {"range": f"users!E{target_row}", "values": [[real_name]]},
-                {"range": f"users!F{target_row}", "values": [[phone_number]]},
-            ],
+            "data": updates,
         },
     ).execute()
 
@@ -1064,17 +1074,59 @@ async def render_product_list(
 # -------------------------
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    register_user_if_new(user)
-
     chat_id = update.effective_chat.id
 
-    # если кухня еще не выбрана — показываем маркетплейс
-    if not context.user_data.get("kitchen_id"):
+    # базовая регистрация (как было)
+    register_user_if_new(user)
+
+    # фиксируем связку в памяти диалога
+    context.user_data["user_id"] = user.id
+    context.user_data["telegram_chat_id"] = chat_id
+
+    kitchen_id = context.user_data.get("kitchen_id")
+
+    # если кухня еще не выбрана, показываем маркетплейс
+    if not kitchen_id:
         await marketplace_start(update, context)
         return
 
-    # если кухня уже выбрана — обычный домашний экран
+    # если кухня выбрана, пробуем тихо сохранить chat_id в users sheet (мультикухонность)
+    try:
+        from kitchen_context import require
+        from sheets_users import save_user_contacts  # если функция лежит в другом файле, скажи и мы поправим импорт
+
+        kitchen = require(kitchen_id)
+
+        # тут не трогаем имя и телефон, если их нет
+        real_name = (user.full_name or "").strip()
+        phone_number = ""
+
+        save_user_contacts(
+            kitchen=kitchen,
+            user_id=user.id,
+            real_name=real_name,
+            phone_number=phone_number,
+            telegram_chat_id=chat_id,
+        )
+    except Exception:
+        # важно: start не должен падать из-за синка контактов
+        pass
+
+    # обычный домашний экран
     await render_home(context, chat_id)
+
+def get_client_chat_id(*, kitchen: KitchenContext, user_id: int) -> int | None:
+    service = get_sheets_service()
+    result = service.spreadsheets().values().get(
+        spreadsheetId=kitchen.spreadsheet_id,
+        range="users!A2:G",
+    ).execute()
+
+    for row in result.get("values", []):
+        if row and row[0] == str(user_id):
+            return int(row[6]) if len(row) > 6 and row[6] else None
+
+    return None
 
 async def dash_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -1623,13 +1675,13 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             delivery_fee=checkout.get("delivery_price_krw"),
             payment_photo_file_id=checkout.get("payment_photo_file_id"),
         )
-        await notify_staff(context.bot, kitchen, order_id)
-        save_user_contacts(
-            kitchen=kitchen,                # 👈 обязательно
-            user_id=user.id,
-            real_name=checkout.get("real_name"),
-            phone_number=checkout.get("phone_number"),
-        )
+        #await notify_staff(context.bot, kitchen, order_id)
+        #save_user_contacts(
+        #    kitchen=kitchen,                # 👈 обязательно
+        #    user_id=user.id,
+        #    real_name=checkout.get("real_name"),
+        #    phone_number=checkout.get("phone_number"),
+        #)
 
         # cleanup
         context.user_data.pop("checkout", None)
@@ -1923,7 +1975,23 @@ async def on_staff_decision(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
         return
 
-    buyer_chat_id = int(target_row[2])
+    buyer_user_id = int(order_row[2])
+
+    buyer_chat_id = get_client_chat_id(
+        kitchen=kitchen,
+        user_id=buyer_user_id,
+    )
+
+    if buyer_chat_id:
+        await context.bot.send_message(
+            chat_id=buyer_chat_id,
+            text="Ваш заказ принят",
+        )
+    else:
+        log.info(
+            f"Client notification skipped: no telegram_chat_id "
+            f"(user_id={buyer_user_id})"
+        )
 
     # --- действие ---
     if action == "approve":
@@ -1977,6 +2045,14 @@ async def on_staff_decision(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
         # --- следующий шаг: выбор ETA ---
+        # 🛑 защита от повторного показа ETA
+        if current_status == "courier_pending_eta":
+            try:
+                await q.message.delete()
+            except Exception:
+                pass
+            return
+
         await context.bot.send_message(
             chat_id=chat_id,
             text="Через сколько должен приехать курьер?",
@@ -2026,10 +2102,26 @@ async def on_staff_decision(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     # --- сообщение покупателю ---
-    await context.bot.send_message(
-        chat_id=buyer_chat_id,
-        text=buyer_text,
+    buyer_user_id = int(target_row[2])
+
+    from sheets_users import get_client_chat_id
+
+    buyer_chat_id = get_client_chat_id(
+        kitchen=kitchen,
+        user_id=buyer_user_id,
     )
+
+    # --- сообщение покупателю ---
+    if buyer_chat_id:
+        await context.bot.send_message(
+            chat_id=buyer_chat_id,
+            text=buyer_text,
+        )
+    else:
+        log.info(
+            f"Client notification skipped: no telegram_chat_id "
+            f"(user_id={buyer_user_id}, order={order_id})"
+        )
 
     # --- фидбек сотруднику ---
     try:
@@ -2304,15 +2396,27 @@ async def on_staff_eta(update: Update, context: ContextTypes.DEFAULT_TYPE):
         log.error(f"Failed to send order {order_id} to courier")
 
     # 🔟 Уведомление клиента
-    buyer_chat_id = int(order_row[2])
-    await context.bot.send_message(
-        chat_id=buyer_chat_id,
-        text=(
-            "Ваш заказ принят в работу.\n"
-            f"Курьер приедет примерно через {minutes} минут.\n"
-            "Вы можете отслеживать доставку в боте курьерской службы."
-        ),
+    buyer_user_id = int(order_row[2])
+
+    buyer_chat_id = get_client_chat_id(
+        kitchen=kitchen,
+        user_id=buyer_user_id,
     )
+
+    if buyer_chat_id:
+        await context.bot.send_message(
+            chat_id=buyer_chat_id,
+            text=(
+                "Ваш заказ принят в работу.\n"
+                f"Курьер приедет примерно через {minutes} минут.\n"
+                "Вы можете отслеживать доставку в боте курьерской службы."
+            ),
+        )
+    else:
+        log.info(
+            "Client notification skipped: no telegram_chat_id "
+            f"(user_id={buyer_user_id})"
+        )
 
     try:
         await q.message.delete()
@@ -2422,11 +2526,23 @@ async def on_staff_no_courier(update: Update, context: ContextTypes.DEFAULT_TYPE
         },
     ).execute()
 
-    buyer_chat_id = int(rows[target_idx - 1][2])
-    await context.bot.send_message(
-        chat_id=buyer_chat_id,
-        text="Ваш заказ принят. Курьер вызываться не будет.",
+    buyer_user_id = int(rows[target_idx - 1][2])
+
+    buyer_chat_id = get_client_chat_id(
+        kitchen=kitchen,
+        user_id=buyer_user_id,
     )
+
+    if buyer_chat_id:
+        await context.bot.send_message(
+            chat_id=buyer_chat_id,
+            text="Ваш заказ принят. Курьер вызываться не будет.",
+        )
+    else:
+        log.info(
+            f"Client notification skipped: no telegram_chat_id "
+            f"(user_id={buyer_user_id})"
+        )
 
     try:
         await q.message.delete()
@@ -2943,7 +3059,7 @@ def get_user_profile(
         sheet.values()
         .get(
             spreadsheetId=kitchen.spreadsheet_id,
-            range="users!A:F",
+            range="users!A:G",
         )
         .execute()
         .get("values", [])
@@ -3055,14 +3171,26 @@ async def on_staff_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             },
         ).execute()
 
-        buyer_chat_id = int(rows[target_idx - 1][2])
-        await context.bot.send_message(
-            chat_id=buyer_chat_id,
-            text=(
-                "Ваш заказ принят в работу.\n"
-                "Вы можете отслеживать доставку в боте курьерской службы."
-            ),
+        buyer_user_id = int(rows[target_idx - 1][2])
+
+        buyer_chat_id = get_client_chat_id(
+            kitchen=kitchen,
+            user_id=buyer_user_id,
         )
+
+        if buyer_chat_id:
+            await context.bot.send_message(
+                chat_id=buyer_chat_id,
+                text=(
+                    "Ваш заказ принят.\n"
+                    "Кухня приступила к приготовлению."
+                ),
+            )
+        else:
+            log.info(
+                f"Client notification skipped: no telegram_chat_id "
+                f"(user_id={buyer_user_id})"
+            )
 
         context.user_data.pop("waiting_manual_eta", None)
         await update.message.reply_text("✅ Время курьера сохранено.")
@@ -3699,7 +3827,7 @@ async def notify_staff(bot, kitchen, order_id: str):
         .values()
         .get(
             spreadsheetId=spreadsheet_id,
-            range="users!A:F",
+            range="users!A:G",
         )
         .execute()
         .get("values", [])
