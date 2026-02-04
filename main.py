@@ -2336,6 +2336,9 @@ async def on_staff_eta(update: Update, context: ContextTypes.DEFAULT_TYPE):
     spreadsheet_id = kitchen.spreadsheet_id
     log.info(f"Kitchen resolved: spreadsheet_id={spreadsheet_id}")
 
+
+
+
     # 3️⃣ Подключение к Sheets
     service = get_sheets_service()
     sheet = service.spreadsheets()
@@ -2484,11 +2487,21 @@ async def on_staff_no_courier(update: Update, context: ContextTypes.DEFAULT_TYPE
     q = update.callback_query
     await q.answer()
 
-    chat_id = q.message.chat_id
-    from kitchen_context import _REGISTRY
+    # kitchen + spreadsheet (важно для мульти-кухонь)
+    # Парсим callback: staff:no_courier:kitchen_id:order_id
+    parts = q.data.split(":")
+    if len(parts) != 4:
+        log.error(f"Invalid no_courier callback: {q.data}")
+        return
 
-    kitchen = _REGISTRY.get(kitchen_id)
-    if not kitchen:
+    _, _, kitchen_id, order_id = parts
+    from kitchen_context import require
+
+    try:
+        kitchen = require(kitchen_id)
+    except Exception as e:
+        log.error(f"Kitchen {kitchen_id} not found: {e}")
+        await q.answer("Кухня недоступна", show_alert=True)
         return
 
     allowed_chat_ids = set()
@@ -2500,17 +2513,10 @@ async def on_staff_no_courier(update: Update, context: ContextTypes.DEFAULT_TYPE
         allowed_chat_ids.update(kitchen.staff_chat_ids)
 
     if chat_id not in allowed_chat_ids:
+        log.warning(
+            f"STAFF ETA DENIED chat_id={chat_id} kitchen={kitchen_id}"
+        )
         return
-
-    # kitchen + spreadsheet (важно для мульти-кухонь)
-    # Парсим callback: staff:no_courier:kitchen_id:order_id
-    parts = q.data.split(":")
-    if len(parts) != 4:
-        log.error(f"Invalid no_courier callback: {q.data}")
-        return
-
-    _, _, kitchen_id, order_id = parts
-
     # Получаем kitchen из callback
     from kitchen_context import require
     try:
