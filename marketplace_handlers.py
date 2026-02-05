@@ -105,7 +105,7 @@ async def marketplace_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await update.message.reply_text(
-        "Выберите заведение:",
+        "Нажмите на кнопку СТАРТ внизу ⬇️ или Открыть маркетплейс:",
         reply_markup=kb_kitchen_select(),
     )
 
