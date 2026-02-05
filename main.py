@@ -2896,58 +2896,79 @@ async def send_to_courier_and_persist(
             f"{payload['pickup_eta_at']}"
         )
 
-   # try:
-        # 4) вызов курьерки
-      #  log.error("[send_to_courier_and_persist] BEFORE courier_create_order")
-      #  res = await courier_create_order(payload)
-      #  log.error(f"[send_to_courier_and_persist] AFTER courier_create_order res={res!r}")
+   # 2) Отправляем заказ в Web API
+    # Web API сам вызовет курьерку через courier_adapter
+    try:
+        webapi_response = await create_webapi_order({
+            "order_id": payload["order_id"],
+            "source": "kitchen",
+            "kitchen_id": kitchen_id_for_webapi,
+            "client_tg_id": payload["client_tg_id"],
+            "client_name": payload["client_name"],
+            "client_phone": payload["client_phone"],
+            "pickup_address": payload["pickup_address"],
+            "delivery_address": payload["delivery_address"],
+            "pickup_eta_at": payload.get("pickup_eta_at"),
+            "city": payload["city"],
+            "comment": payload.get("comment"),
+            "price_krw": payload.get("price_krw"),
+            "eta_minutes": eta_minutes,
+        })
+        
+        log.info(
+            "[send_to_courier_and_persist] Web API SUCCESS | "
+            f"order_id={payload['order_id']} response={webapi_response}"
+        )
+        
+        # Web API вернул успех - фиксируем в Sheets
+        # external_id может быть в ответе от Web API (опционально)
+        external_id = webapi_response.get("delivery_order_id", "")
+        
+        sheet.values().batchUpdate(
+            spreadsheetId=spreadsheet_id,
+            body={
+                "valueInputOption": "RAW",
+                "data": [
+                    {"range": f"orders!W{target_idx}", "values": [[external_id]]},
+                    {"range": f"orders!T{target_idx}", "values": [["courier_requested"]]},
+                    {"range": f"orders!X{target_idx}", "values": [["ok"]]},
+                    {"range": f"orders!Y{target_idx}", "values": [[""]]},
+                    {
+                        "range": f"orders!Z{target_idx}",
+                        "values": [[datetime.now(timezone.utc).isoformat()]],
+                    },
+                ],
+            },
+        ).execute()
+        
+        log.info(
+            "[send_to_courier_and_persist] Sheet updated | "
+            f"order_idx={target_idx} external_id={external_id!r}"
+        )
+        
+        return True
+        
+    except Exception as e:
+        log.exception(
+            "[send_to_courier_and_persist] Web API call or sheet update failed"
+        )
 
-      #  if res.get("status") != "ok":
-       #     raise RuntimeError(f"courier response not ok: {res!r}")
+        # Фиксируем ошибку в Sheets
+        try:
+            sheet.values().batchUpdate(
+                spreadsheetId=spreadsheet_id,
+                body={
+                    "valueInputOption": "RAW",
+                    "data": [
+                        {"range": f"orders!X{target_idx}", "values": [["failed"]]},
+                        {"range": f"orders!Y{target_idx}", "values": [[str(e)[:500]]]},
+                    ],
+                },
+            ).execute()
+        except Exception:
+            log.exception("Failed to update sheet with error status")
 
-      #  external_id = res.get("delivery_order_id") or ""
-
-        # 5) фиксируем успех в Sheets
-      #  sheet.values().batchUpdate(
-      #      spreadsheetId=spreadsheet_id,
-      #      body={
-      #          "valueInputOption": "RAW",
-      #          "data": [
-      #              {"range": f"orders!W{target_idx}", "values": [[external_id]]},
-      #              {"range": f"orders!T{target_idx}", "values": [["courier_requested"]]},
-      #              {"range": f"orders!X{target_idx}", "values": [["ok"]]},
-      #              {"range": f"orders!Y{target_idx}", "values": [[""]]},
-      #              {
-      #                  "range": f"orders!Z{target_idx}",
-      #                  "values": [[datetime.now(timezone.utc).isoformat()]],
-      #              },
-      #          ],
-      #      },
-      #  ).execute()
-
-      #  log.error(
-      #      "[send_to_courier_and_persist] SUCCESS | "
-      #      f"order_idx={target_idx} external_id={external_id!r}"
-      #  )
-      #  return True
-
-   # except Exception as e:
-   #     log.exception(
-   #         "[send_to_courier_and_persist] EXCEPTION while sending to courier"
-   #     )
-
-   #     sheet.values().batchUpdate(
-   #         spreadsheetId=spreadsheet_id,
-   #         body={
-   #             "valueInputOption": "RAW",
-   #             "data": [
-   #                 {"range": f"orders!X{target_idx}", "values": [["failed"]]},
-   #                 {"range": f"orders!Y{target_idx}", "values": [[str(e)[:500]]]},
-   #             ],
-   #         },
-   #     ).execute()
-
-   #     return False
+        return False
 
 
 async def on_staff_courier_retry(update: Update, context: ContextTypes.DEFAULT_TYPE):
