@@ -2896,58 +2896,58 @@ async def send_to_courier_and_persist(
             f"{payload['pickup_eta_at']}"
         )
 
-    try:
+   # try:
         # 4) вызов курьерки
-        log.error("[send_to_courier_and_persist] BEFORE courier_create_order")
-        res = await courier_create_order(payload)
-        log.error(f"[send_to_courier_and_persist] AFTER courier_create_order res={res!r}")
+      #  log.error("[send_to_courier_and_persist] BEFORE courier_create_order")
+      #  res = await courier_create_order(payload)
+      #  log.error(f"[send_to_courier_and_persist] AFTER courier_create_order res={res!r}")
 
-        if res.get("status") != "ok":
-            raise RuntimeError(f"courier response not ok: {res!r}")
+      #  if res.get("status") != "ok":
+       #     raise RuntimeError(f"courier response not ok: {res!r}")
 
-        external_id = res.get("delivery_order_id") or ""
+      #  external_id = res.get("delivery_order_id") or ""
 
         # 5) фиксируем успех в Sheets
-        sheet.values().batchUpdate(
-            spreadsheetId=spreadsheet_id,
-            body={
-                "valueInputOption": "RAW",
-                "data": [
-                    {"range": f"orders!W{target_idx}", "values": [[external_id]]},
-                    {"range": f"orders!T{target_idx}", "values": [["courier_requested"]]},
-                    {"range": f"orders!X{target_idx}", "values": [["ok"]]},
-                    {"range": f"orders!Y{target_idx}", "values": [[""]]},
-                    {
-                        "range": f"orders!Z{target_idx}",
-                        "values": [[datetime.now(timezone.utc).isoformat()]],
-                    },
-                ],
-            },
-        ).execute()
+      #  sheet.values().batchUpdate(
+      #      spreadsheetId=spreadsheet_id,
+      #      body={
+      #          "valueInputOption": "RAW",
+      #          "data": [
+      #              {"range": f"orders!W{target_idx}", "values": [[external_id]]},
+      #              {"range": f"orders!T{target_idx}", "values": [["courier_requested"]]},
+      #              {"range": f"orders!X{target_idx}", "values": [["ok"]]},
+      #              {"range": f"orders!Y{target_idx}", "values": [[""]]},
+      #              {
+      #                  "range": f"orders!Z{target_idx}",
+      #                  "values": [[datetime.now(timezone.utc).isoformat()]],
+      #              },
+      #          ],
+      #      },
+      #  ).execute()
 
-        log.error(
-            "[send_to_courier_and_persist] SUCCESS | "
-            f"order_idx={target_idx} external_id={external_id!r}"
-        )
-        return True
+      #  log.error(
+      #      "[send_to_courier_and_persist] SUCCESS | "
+      #      f"order_idx={target_idx} external_id={external_id!r}"
+      #  )
+      #  return True
 
-    except Exception as e:
-        log.exception(
-            "[send_to_courier_and_persist] EXCEPTION while sending to courier"
-        )
+   # except Exception as e:
+   #     log.exception(
+   #         "[send_to_courier_and_persist] EXCEPTION while sending to courier"
+   #     )
 
-        sheet.values().batchUpdate(
-            spreadsheetId=spreadsheet_id,
-            body={
-                "valueInputOption": "RAW",
-                "data": [
-                    {"range": f"orders!X{target_idx}", "values": [["failed"]]},
-                    {"range": f"orders!Y{target_idx}", "values": [[str(e)[:500]]]},
-                ],
-            },
-        ).execute()
+   #     sheet.values().batchUpdate(
+   #         spreadsheetId=spreadsheet_id,
+   #         body={
+   #             "valueInputOption": "RAW",
+   #             "data": [
+   #                 {"range": f"orders!X{target_idx}", "values": [["failed"]]},
+   #                 {"range": f"orders!Y{target_idx}", "values": [[str(e)[:500]]]},
+   #             ],
+   #         },
+   #     ).execute()
 
-        return False
+   #     return False
 
 
 async def on_staff_courier_retry(update: Update, context: ContextTypes.DEFAULT_TYPE):
