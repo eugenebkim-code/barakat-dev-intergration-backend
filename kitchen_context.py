@@ -216,8 +216,8 @@ def load_registry(force: bool = False) -> None:
 
             spreadsheet_id="1aLAOt31_sR6POGxqfq3ouAqoMt2dyBjw80908SZFF_Q",
 
-            owner_chat_id=2115245228,
-            staff_chat_ids={2115245228},
+            owner_chat_id=1844813721,
+            staff_chat_ids={1844813721},
 
             city="dunpo",
             timezone=None,
