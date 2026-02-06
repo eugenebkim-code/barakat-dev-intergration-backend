@@ -849,13 +849,33 @@ async def render_home(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
 
     await clear_ui(context, chat_id)
 
-    msg = await context.bot.send_photo(
-        chat_id=chat_id,
-        photo=HOME_PHOTO_FILE_ID,
-        caption=home_text(kitchen),
-        parse_mode=ParseMode.HTML,
-        reply_markup=kb_home(),
-    )
+    # ✅ защита если кухня не найдена
+    if not kitchen:
+        m = await context.bot.send_message(
+            chat_id=chat_id,
+            text="Кухня не выбрана. Нажмите /start",
+        )
+        track_msg(context, m.message_id)
+        return
+
+    try:
+        msg = await context.bot.send_photo(
+            chat_id=chat_id,
+            photo=HOME_PHOTO_FILE_ID,
+            caption=home_text(kitchen),
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb_home(),
+        )
+    except BadRequest as e:
+        log.error(f"[render_home] send_photo failed: {e}")
+
+        # fallback чтобы экран жил даже без фото
+        msg = await context.bot.send_message(
+            chat_id=chat_id,
+            text=home_text(kitchen),
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb_home(),
+        )
 
     track_msg(context, msg.message_id)
 
@@ -1087,47 +1107,6 @@ async def render_product_list(
 # -------------------------
 # /start
 # -------------------------
-
-async def start_cmd_alternative(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    chat_id = update.effective_chat.id
-
-    # базовая регистрация
-    register_user_if_new(user)
-
-    # фиксируем связку в памяти диалога
-    context.user_data["user_id"] = user.id
-    context.user_data["telegram_chat_id"] = chat_id
-
-    kitchen_id = context.user_data.get("kitchen_id")
-
-    # если кухня выбрана, сохраняем chat_id
-    if kitchen_id:
-        try:
-            from kitchen_context import require
-            from sheets_users import save_user_contacts
-
-            kitchen = require(kitchen_id)
-            real_name = (user.full_name or "").strip()
-            phone_number = ""
-
-            save_user_contacts(
-                kitchen=kitchen,
-                user_id=user.id,
-                real_name=real_name,
-                phone_number=phone_number,
-                telegram_chat_id=chat_id,
-            )
-        except Exception:
-            pass
-
-    # ✅ ВСЕГДА показываем домашний экран с фото
-    await render_home(context, chat_id)
-    
-    # если кухня не выбрана, показываем маркетплейс ПОСЛЕ фото
-    if not kitchen_id:
-        await marketplace_start(update, context)
-
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
