@@ -849,12 +849,14 @@ async def render_home(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
 
     await clear_ui(context, chat_id)
 
-    msg = await context.bot.send_message(
+    msg = await context.bot.send_photo(
         chat_id=chat_id,
-        text=home_text(kitchen),  # 👈 передаем кухню
+        photo=HOME_PHOTO_FILE_ID,
+        caption=home_text(kitchen),
         parse_mode=ParseMode.HTML,
         reply_markup=kb_home(),
     )
+
     track_msg(context, msg.message_id)
 
 from kitchen_context import KitchenContext
@@ -1865,6 +1867,8 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def on_buyer_payment_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log.info("📸 BUYER PAYMENT PHOTO HANDLER FIRED")
+    photo = update.message.photo[-1]
+    log.info("🖼️ FILE_ID = %s", photo.file_id)
     msg = update.message
     if not msg or not msg.photo:
         return
