@@ -83,7 +83,7 @@ from types import SimpleNamespace
 from marketplace_handlers import get_active_kitchen
 from kitchen_context import KitchenContext
 from config import BOT_TOKEN, ADMIN_IDS, SPREADSHEET_ID, ORDERS_RANGE
-HOME_PHOTO_FILE_ID = "AgACAgUAAxkBAAIEimmGZCvxwJm_-uKOlyQwQ4fCstBIAAI6DmsbItQxVDkrEAKAcqQ8AQADAgADeQADOAQ"
+HOME_PHOTO_FILE_ID = "AgACAgUAAxkBAAIWCmmGZ2GWXQps1gltns_1ooxuNy6DAAKVDGsbOoE4VJIjd_TNBfS3AQADAgADeQADOAQ"
 import inspect
 import requests
 from config import WEB_API_BASE_URL, WEB_API_KEY, WEB_API_TIMEOUT
@@ -1867,15 +1867,14 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def on_buyer_payment_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log.info("📸 BUYER PAYMENT PHOTO HANDLER FIRED")
-    photo = update.message.photo[-1]
-    log.info("🖼️ FILE_ID = %s", photo.file_id)
     msg = update.message
     if not msg or not msg.photo:
         return
 
+    photo = msg.photo[-1]
+    log.info("🖼️ FILE_ID = %s", photo.file_id)
+
     chat_id = msg.chat_id
-    if chat_id in STAFF_CHAT_IDS:
-        return
 
     checkout = context.user_data.get("checkout")
     if not checkout or checkout.get("step") != "wait_photo":
