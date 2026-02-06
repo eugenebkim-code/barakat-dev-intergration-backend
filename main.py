@@ -1087,6 +1087,48 @@ async def render_product_list(
 # -------------------------
 # /start
 # -------------------------
+
+async def start_cmd_alternative(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    chat_id = update.effective_chat.id
+
+    # базовая регистрация
+    register_user_if_new(user)
+
+    # фиксируем связку в памяти диалога
+    context.user_data["user_id"] = user.id
+    context.user_data["telegram_chat_id"] = chat_id
+
+    kitchen_id = context.user_data.get("kitchen_id")
+
+    # если кухня выбрана, сохраняем chat_id
+    if kitchen_id:
+        try:
+            from kitchen_context import require
+            from sheets_users import save_user_contacts
+
+            kitchen = require(kitchen_id)
+            real_name = (user.full_name or "").strip()
+            phone_number = ""
+
+            save_user_contacts(
+                kitchen=kitchen,
+                user_id=user.id,
+                real_name=real_name,
+                phone_number=phone_number,
+                telegram_chat_id=chat_id,
+            )
+        except Exception:
+            pass
+
+    # ✅ ВСЕГДА показываем домашний экран с фото
+    await render_home(context, chat_id)
+    
+    # если кухня не выбрана, показываем маркетплейс ПОСЛЕ фото
+    if not kitchen_id:
+        await marketplace_start(update, context)
+
+
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     chat_id = update.effective_chat.id
