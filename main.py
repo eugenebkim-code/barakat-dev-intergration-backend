@@ -2407,8 +2407,6 @@ async def on_staff_eta(update: Update, context: ContextTypes.DEFAULT_TYPE):
     order_row_before = rows[target_idx - 1]
 
     try:
-        # ✅ НОВОЕ: Формируем обновлённый комментарий
-        # comment = колонка AA (индекс 26)
         COMMENT_COL_IDX = 26
 
         existing_comment = (
@@ -2419,7 +2417,6 @@ async def on_staff_eta(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         eta_note = f"Курьер через {minutes} мин"
 
-        # Если комментарий уже есть, добавляем через разделитель
         if existing_comment and existing_comment.strip():
             new_comment = f"{existing_comment} | {eta_note}"
         else:
@@ -2430,6 +2427,7 @@ async def on_staff_eta(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"old='{existing_comment}' new='{new_comment}'"
         )
 
+        # 1️⃣ ETA + courier decision + comment
         sheet.values().batchUpdate(
             spreadsheetId=spreadsheet_id,
             body={
@@ -2438,7 +2436,19 @@ async def on_staff_eta(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     {"range": f"orders!R{target_idx}", "values": [[pickup_eta_at]]},
                     {"range": f"orders!S{target_idx}", "values": [["preset"]]},
                     {"range": f"orders!T{target_idx}", "values": [["courier_requested"]]},
-                    {"range": f"orders!AA{target_idx}", "values": [[new_comment]]},  # ✅ COMMENT
+                    {"range": f"orders!AA{target_idx}", "values": [[new_comment]]},
+                ],
+            },
+        ).execute()
+
+        # 2️⃣ kitchen accepted (AG / AH)
+        sheet.values().batchUpdate(
+            spreadsheetId=spreadsheet_id,
+            body={
+                "valueInputOption": "RAW",
+                "data": [
+                    {"range": f"orders!AG{target_idx}", "values": [["accepted"]]},
+                    {"range": f"orders!AH{target_idx}", "values": [[datetime.utcnow().isoformat()]]},
                 ],
             },
         ).execute()
@@ -2449,8 +2459,8 @@ async def on_staff_eta(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     except Exception:
-            log.exception(f"Failed to update ETA/comment for order {order_id}")
-            return
+        log.exception(f"Failed to update ETA/comment for order {order_id}")
+        return
 
     # 8️⃣ Перечитываем строку
     rows = sheet.values().get(

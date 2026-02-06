@@ -9,6 +9,37 @@ from keyboards_staff import kb_staff_pickup_eta, kb_staff_only_check
 
 log = logging.getLogger("STAFF_CALLBACKS")
 
+def find_order_row_index(
+    *,
+    spreadsheet_id: str,
+    order_id: str,
+) -> int | None:
+    """
+    Возвращает индекс строки (1-based), как в Google Sheets (A1),
+    то есть первая строка заголовки, данные начинаются со 2.
+    """
+    try:
+        service = get_sheets_service()
+        sheet = service.spreadsheets()
+
+        rows = (
+            sheet.values()
+            .get(
+                spreadsheetId=spreadsheet_id,
+                range=ORDERS_RANGE,
+            )
+            .execute()
+            .get("values", [])
+        )
+
+        for idx, r in enumerate(rows[1:], start=2):
+            if r and r[0] == str(order_id):
+                return idx
+
+    except Exception:
+        log.exception("find_order_row_index failed order_id=%s", order_id)
+
+    return None
 
 async def staff_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -81,6 +112,51 @@ async def staff_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             staff_username=staff_user.username,
         )
         log.info(f"handle_staff_decision OK for order {order_id}")
+        # 3.2: kitchen_state -> orders!AG/AH (accepted / rejected)
+        try:
+            spreadsheet_id = kitchen.spreadsheet_id
+            target_idx = find_order_row_index(
+                spreadsheet_id=spreadsheet_id,
+                order_id=order_id,
+            )
+
+            if target_idx is None:
+                log.warning(
+                    "[KITCHEN_STATE] row not found, skip | order=%s kitchen=%s",
+                    order_id,
+                    kitchen_id,
+                )
+            else:
+                state = "accepted" if decision == "approved" else "rejected"
+                now_iso = datetime.utcnow().isoformat()
+
+                service = get_sheets_service()
+                sheet = service.spreadsheets()
+
+                sheet.values().batchUpdate(
+                    spreadsheetId=spreadsheet_id,
+                    body={
+                        "valueInputOption": "RAW",
+                        "data": [
+                            {"range": f"orders!AG{target_idx}", "values": [[state]]},
+                            {"range": f"orders!AH{target_idx}", "values": [[now_iso]]},
+                        ],
+                    },
+                ).execute()
+
+                log.info(
+                    "[KITCHEN_STATE] updated | order=%s state=%s row=%s",
+                    order_id,
+                    state,
+                    target_idx,
+                )
+
+        except Exception:
+            log.exception(
+                "[KITCHEN_STATE] update failed | order=%s kitchen=%s",
+                order_id,
+                kitchen_id,
+            )
     except Exception:
         log.exception(f"handle_staff_decision FAILED for order {order_id}")
         try:
