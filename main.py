@@ -83,7 +83,7 @@ from types import SimpleNamespace
 from marketplace_handlers import get_active_kitchen
 from kitchen_context import KitchenContext
 from config import BOT_TOKEN, ADMIN_IDS, SPREADSHEET_ID, ORDERS_RANGE
-HOME_PHOTO_FILE_ID = "AgACAgUAAxkBAAIBWml2tkzPZ3lgBPKTVeeA3Wi9Z3yJAAKuDWsbhLi4VyKeP_hEUISAAQADAgADeQADOAQ"
+HOME_PHOTO_FILE_ID = "AgACAgUAAxkBAAIEimmGZCvxwJm_-uKOlyQwQ4fCstBIAAI6DmsbItQxVDkrEAKAcqQ8AQADAgADeQADOAQ"
 import inspect
 import requests
 from config import WEB_API_BASE_URL, WEB_API_KEY, WEB_API_TIMEOUT
